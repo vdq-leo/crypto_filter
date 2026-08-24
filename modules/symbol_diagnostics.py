@@ -63,7 +63,6 @@ def forecast_garch(returns, steps=10, ann_factor=1):
     fc_var = fc.variance.values[-1]
     fc_vol = np.sqrt(fc_var) * np.sqrt(ann_factor)
     return fc_vol, hist_vol
-    return fc_vol, hist_vol
 
 # --- STYLING CONSTANTS ---
 THEME_BG = "#0b3d91"
@@ -139,7 +138,21 @@ def symbol_diagnostics_ui():
                             # 3. Trading Statistics (Binance)
                             ui.card(
                                 ui.card_header("Trading Statistics (Binance Futures)"),
-                                output_widget("plot_trading_stats")
+                                ui.layout_columns(
+                                    ui.div(output_widget("plot_ts_funding")),
+                                    ui.div(output_widget("plot_ts_oi")),
+                                    col_widths=[6, 6]
+                                ),
+                                ui.layout_columns(
+                                    ui.div(output_widget("plot_ts_top_pos")),
+                                    ui.div(output_widget("plot_ts_top_acc")),
+                                    col_widths=[6, 6]
+                                ),
+                                ui.layout_columns(
+                                    ui.div(output_widget("plot_ts_glob_acc")),
+                                    ui.div(output_widget("plot_ts_taker")),
+                                    col_widths=[6, 6]
+                                ),
                             ),
                             
                             # 4. Forecast
@@ -619,64 +632,69 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         d = diag_data.get()
         return f"{d.get('adl_risk', 0)}" if d else "-"
 
-    @render_widget
-    def plot_trading_stats():
-        d = diag_data.get()
-        if not d: return go.Figure()
-        
-        from plotly.subplots import make_subplots
-        fig = make_subplots(rows=3, cols=2, subplot_titles=(
-            "Funding Rate", "OI / Circulating", 
-            "Top Trader L/S (Pos)", "Top Trader L/S (Acc)", 
-            "Global L/S Account", "Taker Buy/Sell Vol"
-        ))
-        
-        # Funding
-        if d.get("ts_fund"):
-            df = pd.DataFrame(d["ts_fund"])
-            if not df.empty and 'fundingTime' in df.columns:
-                df['time'] = pd.to_datetime(df['fundingTime'], unit='ms')
-                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df['fundingRate']), name="Funding Rate", line=dict(color='cyan')), row=1, col=1)
-                
-        # OI
-        if d.get("ts_oi"):
-            df = pd.DataFrame(d["ts_oi"])
-            if not df.empty and 'timestamp' in df.columns:
-                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df['oi_circ'] = pd.to_numeric(df.get('sumOpenInterest', 0)) / pd.to_numeric(df.get('CMCCirculatingSupply', 1)).replace(0, np.nan)
-                fig.add_trace(go.Scatter(x=df['time'], y=df['oi_circ'], name="OI / Circ", line=dict(color='orange')), row=1, col=2)
-                
-        # Top Pos
-        if d.get("ts_top_pos"):
-            df = pd.DataFrame(d["ts_top_pos"])
-            if not df.empty and 'timestamp' in df.columns:
-                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
-                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df.get('longShortRatio', 0)), name="Top L/S Pos", line=dict(color='lime')), row=2, col=1)
-                
-        # Top Acc
-        if d.get("ts_top_acc"):
-            df = pd.DataFrame(d["ts_top_acc"])
-            if not df.empty and 'timestamp' in df.columns:
-                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
-                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df.get('longShortRatio', 0)), name="Top L/S Acc", line=dict(color='lime')), row=2, col=2)
-                
-        # Global Acc
-        if d.get("ts_glob_acc"):
-            df = pd.DataFrame(d["ts_glob_acc"])
-            if not df.empty and 'timestamp' in df.columns:
-                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
-                fig.add_trace(go.Scatter(x=df['time'], y=pd.to_numeric(df.get('longShortRatio', 0)), name="Global L/S Acc", line=dict(color='magenta')), row=3, col=1)
-                
-        # Taker Buy/Sell
-        if d.get("ts_taker"):
-            df = pd.DataFrame(d["ts_taker"])
-            if not df.empty and 'timestamp' in df.columns:
-                df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
-                ratio = pd.to_numeric(df.get('buySellRatio', df.get('longShortRatio', 0)))
-                fig.add_trace(go.Scatter(x=df['time'], y=ratio, name="Taker Buy/Sell", line=dict(color='yellow')), row=3, col=2)
-                
-        fig.update_layout(template="plotly_dark", height=800, showlegend=False, margin=dict(t=40, b=20, l=20, r=20), paper_bgcolor=THEME_BG, plot_bgcolor=THEME_BG)
+    def _make_ts_fig(title, x, y, color):
+        """Helper: build a single trading-stat line chart."""
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=x, y=y, name=title, line=dict(color=color)))
+        fig.update_layout(title=title, height=280, showlegend=False)
         return apply_theme(fig)
+
+    @render_widget
+    def plot_ts_funding():
+        d = diag_data.get()
+        if not d or not d.get("ts_fund"): return go.Figure()
+        df = pd.DataFrame(d["ts_fund"])
+        if df.empty or 'fundingTime' not in df.columns: return go.Figure()
+        df['time'] = pd.to_datetime(df['fundingTime'], unit='ms')
+        return _make_ts_fig("Funding Rate", df['time'], pd.to_numeric(df['fundingRate'], errors='coerce'), 'cyan')
+
+    @render_widget
+    def plot_ts_oi():
+        d = diag_data.get()
+        if not d or not d.get("ts_oi"): return go.Figure()
+        df = pd.DataFrame(d["ts_oi"])
+        if df.empty or 'timestamp' not in df.columns: return go.Figure()
+        df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        oi = pd.to_numeric(df['sumOpenInterest'], errors='coerce')
+        circ = pd.to_numeric(df['CMCCirculatingSupply'], errors='coerce').replace(0, np.nan)
+        return _make_ts_fig("OI / Circulating", df['time'], oi / circ, 'orange')
+
+    @render_widget
+    def plot_ts_top_pos():
+        d = diag_data.get()
+        if not d or not d.get("ts_top_pos"): return go.Figure()
+        df = pd.DataFrame(d["ts_top_pos"])
+        if df.empty or 'timestamp' not in df.columns: return go.Figure()
+        df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return _make_ts_fig("Top Trader L/S (Positions)", df['time'], pd.to_numeric(df['longShortRatio'], errors='coerce'), 'lime')
+
+    @render_widget
+    def plot_ts_top_acc():
+        d = diag_data.get()
+        if not d or not d.get("ts_top_acc"): return go.Figure()
+        df = pd.DataFrame(d["ts_top_acc"])
+        if df.empty or 'timestamp' not in df.columns: return go.Figure()
+        df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return _make_ts_fig("Top Trader L/S (Accounts)", df['time'], pd.to_numeric(df['longShortRatio'], errors='coerce'), 'lime')
+
+    @render_widget
+    def plot_ts_glob_acc():
+        d = diag_data.get()
+        if not d or not d.get("ts_glob_acc"): return go.Figure()
+        df = pd.DataFrame(d["ts_glob_acc"])
+        if df.empty or 'timestamp' not in df.columns: return go.Figure()
+        df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return _make_ts_fig("Global L/S Account", df['time'], pd.to_numeric(df['longShortRatio'], errors='coerce'), 'magenta')
+
+    @render_widget
+    def plot_ts_taker():
+        d = diag_data.get()
+        if not d or not d.get("ts_taker"): return go.Figure()
+        df = pd.DataFrame(d["ts_taker"])
+        if df.empty or 'timestamp' not in df.columns: return go.Figure()
+        df['time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        col = 'buySellRatio' if 'buySellRatio' in df.columns else 'longShortRatio'
+        return _make_ts_fig("Taker Buy/Sell Ratio", df['time'], pd.to_numeric(df[col], errors='coerce'), 'yellow')
 
     @render_widget
     def plot_metrics():
