@@ -4,6 +4,7 @@ from typing import List, Optional, Dict, Any
 from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL
+from src.shared_state import get_manager, get_engine
 import pandas as pd
 import numpy as np
 import logging
@@ -12,8 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-manager = DataManager()
-engine = MetricsEngine()
+manager = get_manager()
+engine = get_engine()
 
 class SnapshotRequest(BaseModel):
     symbols: List[str]

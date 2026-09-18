@@ -12,6 +12,7 @@ from scipy.stats import gaussian_kde, rankdata
 from src.metrics import MetricsEngine, copula_cond_probs
 from src.config import AVAILABLE_INTERVALS
 from src.logger import logger
+from src.shared_state import get_manager, get_engine
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -142,7 +143,7 @@ def pair_radar_ui():
     )
 
 def pair_radar_server(input, output, session, global_interval):
-    manager = DataManager()
+    manager = get_manager()
     pair_data = reactive.Value(pd.DataFrame())
     metrics_res = reactive.Value({})
     

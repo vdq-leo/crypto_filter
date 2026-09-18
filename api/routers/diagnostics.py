@@ -10,11 +10,12 @@ from sklearn.linear_model import LinearRegression
 from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.shared_state import get_manager, get_engine
 from ml_engine.analysis.multivariate import DecompositionEngine
 
 router = APIRouter()
-manager = DataManager()
-engine = MetricsEngine()
+manager = get_manager()
+engine = get_engine()
 
 class DiagnosticsRequest(BaseModel):
     symbol: str = "BTCUSDT"

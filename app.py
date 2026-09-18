@@ -25,6 +25,7 @@ from modules.pair_radar import pair_radar_ui, pair_radar_server
 from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL
+from src.shared_state import get_manager, get_engine
 from datetime import datetime, timedelta
 
 # UI definition
@@ -71,11 +72,11 @@ app_ui = ui.page_navbar(
                         ui.p("Cross-asset correlation & Multivariate construction."),
                         ui.input_action_button("go_multivariate", "multivariate_analysis", class_="btn-primary w-100")
                     ),
-                    # ui.card(
-                    #     ui.card_header("Predictive"),
-                    #     ui.p("ML forecasting with meta-labeling verification protocols."),
-                    #     ui.input_action_button("go_predictive", "explore_models", class_="btn-primary w-100")
-                    # ),
+                    ui.card(
+                        ui.card_header("Predictive"),
+                        ui.p("ML forecasting with meta-labeling verification protocols."),
+                        ui.input_action_button("go_predictive", "explore_models", class_="btn-primary w-100")
+                    ),
                     ui.card(
                         ui.card_header("Pair Radar"),
                         ui.p("Statistical arbitrage & pair trading analytics."),
@@ -94,8 +95,8 @@ app_ui = ui.page_navbar(
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
     ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
-    # ui.nav_panel("PREDICTIVE", predictive_ui()),
-    # ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
+    ui.nav_panel("PREDICTIVE", predictive_ui()),
+    ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
     # ui.nav_spacer(),
     # ui.nav_control(ui.output_ui("data_status_")),
@@ -131,8 +132,8 @@ app_ui = ui.page_navbar(
 def server(input, output, session):
     # Shared global state if needed
     global_interval = reactive.Value("1h")
-    manager = DataManager()
-    engine = MetricsEngine()
+    manager = get_manager()
+    engine = get_engine()
     
     diag_data = reactive.Value({})
     data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"}})

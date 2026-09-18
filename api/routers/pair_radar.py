@@ -11,10 +11,11 @@ from scipy.stats import gaussian_kde, rankdata
 from src.data import DataManager
 from src.metrics import MetricsEngine, copula_cond_probs
 from src.logger import logger
+from src.shared_state import get_manager, get_engine
 
 router = APIRouter()
-manager = DataManager()
-engine = MetricsEngine()
+manager = get_manager()
+engine = get_engine()
 
 class PairRequest(BaseModel):
     symbol_a: str

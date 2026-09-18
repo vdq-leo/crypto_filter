@@ -7,9 +7,10 @@ import numpy as np
 from src.data import DataManager
 from ml_engine.analysis.multivariate import MatrixEngine, DecompositionEngine
 from src.config import MANDATORY_CRYPTO
+from src.shared_state import get_manager, get_engine
 
 router = APIRouter()
-manager = DataManager()
+manager = get_manager()
 
 class MatrixRequest(BaseModel):
     symbols: List[str]

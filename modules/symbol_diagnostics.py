@@ -16,33 +16,13 @@ from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
+from src.shared_state import get_manager, get_engine
 import requests
 from ml_engine.labeling.labeler import Labeler
 from ml_engine.analysis.multivariate import DecompositionEngine
 from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
 
 # --- GARCH HELPER ---
-def garch_neg_log_likelihood(params, returns):
-    omega, alpha, beta = params
-    n = len(returns)
-    sigma2 = np.zeros(n)
-    sigma2[0] = np.var(returns)
-    
-    for t in range(1, n):
-        sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
-        
-    log_likelihood = -0.5 * np.sum(np.log(sigma2) + returns**2 / sigma2)
-    return -log_likelihood
-
-def fit_garch(returns):
-    # Constraints: omega > 0, alpha >= 0, beta >= 0, alpha + beta < 1
-    bounds = ((1e-6, None), (1e-6, 1), (1e-6, 1))
-    # Initial guess
-    initial_params = [np.var(returns)*0.01, 0.1, 0.8]
-    
-    res = minimize(garch_neg_log_likelihood, initial_params, args=(returns,),
-                   bounds=bounds, method='L-BFGS-B')
-    return res.x
 
 from arch import arch_model
 
@@ -225,8 +205,8 @@ def symbol_diagnostics_ui():
     )
     
 def symbol_diagnostics_server(input, output, session, global_interval):
-    manager = DataManager()
-    engine = MetricsEngine()
+    manager = get_manager()
+    engine = get_engine()
     
     diag_data = reactive.Value({})
     engineering_results_cache = reactive.Value(None)

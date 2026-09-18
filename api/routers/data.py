@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from src.data import BinanceFuturesFetcher, DataManager
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.shared_state import get_manager, get_engine
 from datetime import datetime
 import pandas as pd
 import numpy as np
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Singletons equivalent for the router
 fetcher = BinanceFuturesFetcher()
-manager = DataManager()
+manager = get_manager()
 
 class FetchRequest(BaseModel):
     symbols: List[str]

@@ -7,6 +7,56 @@ import pandas as pd
 from typing import Dict, List, Optional
 from scipy import stats
 from statsmodels.tsa.stattools import adfuller
+import numba
+
+@numba.njit
+def _rma(x, n_period):
+    a = np.full_like(x, np.nan)
+    if len(x) < n_period: return a
+    start_idx = -1
+    for i in range(len(x)):
+        if not np.isnan(x[i]):
+            if start_idx == -1:
+                start_idx = i
+            if i - start_idx + 1 == n_period:
+                # Calculate mean manually instead of np.nanmean to be safe with Numba
+                sum_val = 0.0
+                count = 0
+                for k in range(start_idx, i+1):
+                    if not np.isnan(x[k]):
+                        sum_val += x[k]
+                        count += 1
+                a[i] = sum_val / count if count > 0 else np.nan
+                alpha = 1.0 / n_period
+                for j in range(i+1, len(x)):
+                    a[j] = alpha * x[j] + (1 - alpha) * a[j-1]
+                break
+    return a
+
+@numba.njit
+def _get_pivots(src, left, right, is_high):
+    n = len(src)
+    pivots = np.full(n, np.nan)
+    for i in range(left + right, n):
+        idx = i - right
+        is_pivot = True
+        
+        for j in range(idx - left, idx):
+            if is_high and src[j] >= src[idx]:
+                is_pivot = False; break
+            if not is_high and src[j] <= src[idx]:
+                is_pivot = False; break
+        if not is_pivot: continue
+        
+        for j in range(idx + 1, i + 1):
+            if is_high and src[j] >= src[idx]:
+                is_pivot = False; break
+            if not is_high and src[j] <= src[idx]:
+                is_pivot = False; break
+                
+        if is_pivot:
+            pivots[i] = src[idx]
+    return pivots
 
 class MetricsEngine:
     """Calculates metrics from price data using vectorized operations."""
@@ -130,21 +180,24 @@ class MetricsEngine:
         return pd.Series(res, index=close.index)
 
     @staticmethod
-    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None) -> pd.DataFrame:
+    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None, tail_only: bool = False) -> pd.DataFrame:
         """
         Calculates all 11 advanced metrics requested by the user.
         Returns a DataFrame with the same index as the input df.
         """
+        w_slow = int(window * 3)
+        w_short = int(window * 0.5)
+        w_mid = window
+
+        if tail_only and len(df) > w_slow * 2:
+            # Keep enough history to warm up EMAs and rolling windows
+            df = df.tail(w_slow * 2).copy()
+
         res = pd.DataFrame(index=df.index)
         close = df['close']
         high = df['high']
         low = df['low']
         volume = df['volume']
-        
-        # Scaling factors for related windows
-        w_slow = int(window * 3)
-        w_short = int(window * 0.5)
-        w_mid = window
 
         # Core returns calculation
         ret = close.pct_change()
@@ -226,11 +279,11 @@ class MetricsEngine:
         if should_calc('rolling_sign_lag10'): res['rolling_sign_lag10'] = np.sign(ret.rolling(10).mean())
         if should_calc('rolling_sign_lag20'): res['rolling_sign_lag20'] = np.sign(ret.rolling(20).mean())
 
-        # 14. Autocorrelation - Optimization: use pd.Series.autocorr only if explicitly needed and small window
+        # 14. Autocorrelation
         if should_calc('autocorr_1'):
-            res['autocorr_1'] = ret.rolling(5).apply(lambda x: x.autocorr(lag=1) if len(x) == 5 else np.nan, raw=False)
+            res['autocorr_1'] = ret.rolling(5).corr(ret.shift(1))
         if should_calc('autocorr_5'):
-            res['autocorr_5'] = ret.rolling(20).apply(lambda x: x.autocorr(lag=5) if len(x) == 20 else np.nan, raw=False)
+            res['autocorr_5'] = ret.rolling(20).corr(ret.shift(5))
         
         # 15. Imbalance Bar
         if should_calc('imbalance_bar'):
@@ -260,7 +313,7 @@ class MetricsEngine:
         
         if should_calc('vol_rank'):
             vol = ret.rolling(window).std()
-            res['vol_rank'] = vol.rolling(window).apply(lambda x: (x <= x.iloc[-1]).mean())
+            res['vol_rank'] = vol.rolling(window).rank(pct=True)
         
         # 228. FIP (Frog-in-the-Pan)
         if should_calc('fip'):
@@ -468,13 +521,10 @@ class MetricsEngine:
         
         hist = tau_sma - tau_smooth
                 
-        # Add 1 NaN at start to match original length
         hist = pd.concat([pd.Series([np.nan]), hist], ignore_index=True)
         tau_sma = pd.concat([pd.Series([np.nan]), tau_sma], ignore_index=True)
         tau_smooth = pd.concat([pd.Series([np.nan]), tau_smooth], ignore_index=True)
         
-        return hist, tau_sma, tau_smooth
-
         return hist, tau_sma, tau_smooth
 
     @staticmethod
@@ -504,56 +554,17 @@ class MetricsEngine:
         if n < max(len_up, len_down, period):
             return pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index), pd.Series(0.0, index=df.index)
 
-        def rma(x, n_period):
-            a = np.full_like(x, np.nan)
-            if len(x) < n_period: return a
-            start_idx = -1
-            for i in range(len(x)):
-                if not np.isnan(x[i]):
-                    if start_idx == -1:
-                        start_idx = i
-                    if i - start_idx + 1 == n_period:
-                        a[i] = np.nanmean(x[start_idx:i+1])
-                        alpha = 1.0 / n_period
-                        for j in range(i+1, len(x)):
-                            a[j] = alpha * x[j] + (1 - alpha) * a[j-1]
-                        break
-            return a
-
         def stdev_func(x, n_period):
             return pd.Series(x).rolling(n_period).std(ddof=0).values
-
-        def get_pivots(src, left, right, is_high):
-            pivots = np.full(n, np.nan)
-            for i in range(left + right, n):
-                idx = i - right
-                is_pivot = True
-                
-                for j in range(idx - left, idx):
-                    if is_high and src[j] >= src[idx]:
-                        is_pivot = False; break
-                    if not is_high and src[j] <= src[idx]:
-                        is_pivot = False; break
-                if not is_pivot: continue
-                
-                for j in range(idx + 1, i + 1):
-                    if is_high and src[j] >= src[idx]:
-                        is_pivot = False; break
-                    if not is_high and src[j] <= src[idx]:
-                        is_pivot = False; break
-                        
-                if is_pivot:
-                    pivots[i] = src[idx]
-            return pivots
 
         tr = np.zeros_like(close)
         tr[0] = high[0] - low[0]
         for i in range(1, n):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
-        atr_len_up = rma(tr, len_up)
-        atr_len_down = rma(tr, len_down)
-        atr_14 = rma(tr, 14)
+        atr_len_up = _rma(tr, len_up)
+        atr_len_down = _rma(tr, len_down)
+        atr_14 = _rma(tr, 14)
         
         logret = np.zeros_like(close)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -588,8 +599,8 @@ class MetricsEngine:
         mult_dyn = mult_base * np.power(vr_mult, -beta_mult)
         mult_dyn = np.clip(mult_dyn, mult_base * 0.1, mult_base * 5.0)
         
-        ph = get_pivots(high, len_up, len_up, True)
-        pl = get_pivots(low, len_down, len_down, False)
+        ph = _get_pivots(high, len_up, len_up, True)
+        pl = _get_pivots(low, len_down, len_down, False)
         
         slope_up = np.zeros(n)
         slope_down = np.zeros(n)
@@ -881,6 +892,36 @@ class MetricsEngine:
             '1M': '1d'
         }
         period = period_mapping.get(interval, '1h')
+        
+        # Pre-fetch per-symbol API stats in parallel to avoid sequential blocking
+        import concurrent.futures
+        
+        api_stats_cache = {}
+        def fetch_symbol_stats(sym):
+            try:
+                oi_hist = fetcher.get_historical_stats(sym, period, fetcher.OPEN_INTEREST_HIST)
+                top_pos = fetcher.get_historical_stats(sym, period, fetcher.TOP_LS_POSITION)
+                top_acc = fetcher.get_historical_stats(sym, period, fetcher.TOP_LS_ACCOUNT)
+                glob_acc = fetcher.get_historical_stats(sym, period, fetcher.GLOBAL_LS_ACCOUNT)
+                taker_ratio = fetcher.get_historical_stats(sym, period, fetcher.TAKER_BUY_SELL)
+                return sym, {
+                    'oi_hist': oi_hist,
+                    'top_pos': top_pos,
+                    'top_acc': top_acc,
+                    'glob_acc': glob_acc,
+                    'taker_ratio': taker_ratio
+                }
+            except Exception as e:
+                print(f"Error pre-fetching stats for {sym}: {e}")
+                return sym, {}
+
+        # Fetch missing symbols (not already fetched recently or dynamically)
+        symbols_to_fetch = list(prices_data.keys())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_sym = {executor.submit(fetch_symbol_stats, sym): sym for sym in symbols_to_fetch}
+            for future in concurrent.futures.as_completed(future_to_sym):
+                sym, data = future.result()
+                api_stats_cache[sym] = data
             
         for symbol, df in prices_data.items():
             try:
@@ -901,7 +942,7 @@ class MetricsEngine:
                 if len(prices) < 2: continue
                 
                 # Advanced Metrics (Standardized)
-                adv_df = self.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns, benchmark_prices=benchmark_prices)
+                adv_df = self.calculate_all_indicators(df, window=window, benchmark_returns=benchmark_returns, benchmark_prices=benchmark_prices, interval=interval, tail_only=True)
                 latest_adv = adv_df.iloc[-1].to_dict()
                 
                 row = {
@@ -912,12 +953,13 @@ class MetricsEngine:
                 row.update(latest_adv)
                 row['funding_rate'] = funding_rates.get(symbol, np.nan)
                 
-                # Fetch statistics from Binance endpoints
-                oi_hist = fetcher.get_historical_stats(symbol, period, fetcher.OPEN_INTEREST_HIST)
-                top_pos = fetcher.get_historical_stats(symbol, period, fetcher.TOP_LS_POSITION)
-                top_acc = fetcher.get_historical_stats(symbol, period, fetcher.TOP_LS_ACCOUNT)
-                glob_acc = fetcher.get_historical_stats(symbol, period, fetcher.GLOBAL_LS_ACCOUNT)
-                taker_ratio = fetcher.get_historical_stats(symbol, period, fetcher.TAKER_BUY_SELL)
+                # Retrieve pre-fetched statistics
+                sym_stats = api_stats_cache.get(symbol, {})
+                oi_hist = sym_stats.get('oi_hist', {})
+                top_pos = sym_stats.get('top_pos', {})
+                top_acc = sym_stats.get('top_acc', {})
+                glob_acc = sym_stats.get('glob_acc', {})
+                taker_ratio = sym_stats.get('taker_ratio', {})
                 
                 # Compute OI / Circulating Supply
                 sum_oi = float(oi_hist.get("sumOpenInterest", 0))
@@ -930,14 +972,6 @@ class MetricsEngine:
                 row['global_ls_ratio'] = float(glob_acc.get("longShortRatio", np.nan))
                 row['taker_buysell_ratio'] = float(taker_ratio.get("buySellRatio", taker_ratio.get("longShortRatio", np.nan)))
                 row['adl_risk'] = float(adl_risks.get(symbol, 0))
-                
-                # # Fetch orderbook metrics
-                # book_stats = fetcher.get_books_status(symbol)
-                # row['orderbook_imbalance'] = book_stats.get('orderbook_imbalance', np.nan)
-                # row['spread'] = book_stats.get('impact_spread', np.nan)
-                
-                # Small sleep to respect rate limits (orderbook endpoint has weight 50)
-                time.sleep(0.05)
                 
                 # Store in cache
                 self._results_cache[cache_key] = {

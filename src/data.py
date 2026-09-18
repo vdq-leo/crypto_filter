@@ -21,7 +21,14 @@ logger = logging.getLogger(__name__)
 class BinanceFuturesFetcher:
     """Fetches data from Binance Perpetual Futures (USDT-M)"""
     
-    BASE_URL = "https://fapi.binance.com"
+    BASE_URLS = [
+        os.environ.get("BINANCE_BASE_URL", "https://fapi.binance.com"),
+        "https://fapi1.binance.com",
+        "https://fapi2.binance.com",
+        "https://fapi3.binance.com",
+        "https://fapi4.binance.com"
+    ]
+    BASE_URL = BASE_URLS[0]
     TICKER_24H = "/fapi/v1/ticker/24hr"
     KLINES = "/fapi/v1/klines"
     EXCHANGE_INFO = "/fapi/v1/exchangeInfo"
@@ -118,18 +125,28 @@ class BinanceFuturesFetcher:
             return []
 
     def _request(self, endpoint: str, params: dict = None) -> dict:
-        url = f"{self.BASE_URL}{endpoint}"
-        try:
-            response = self.session.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            # Propagate HTTP errors so callers can handle 418/429
-            logger.error(f"HTTP Error {response.status_code} for {endpoint}: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Request failed {endpoint}: {e}")
-            return {}
+        last_error = None
+        for base in self.BASE_URLS:
+            url = f"{base}{endpoint}"
+            try:
+                response = self.session.get(url, params=params, timeout=8)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                # Propagate HTTP errors so callers can handle 418/429
+                status_code = getattr(e.response, 'status_code', 'Unknown')
+                logger.error(f"HTTP Error {status_code} for {endpoint}: {e}")
+                raise
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_error = e
+                logger.warning(f"Connection/DNS failed for {url}: {e}. Retrying with mirror...")
+                continue
+            except Exception as e:
+                logger.error(f"Request failed {endpoint}: {e}")
+                return {}
+        if last_error:
+            logger.error(f"All Binance endpoints failed for {endpoint}: {last_error}")
+        return {}
 
     def get_orderbooks(self, symbol: str) -> pd.DataFrame:
         """Get orderbook for a single symbol"""
@@ -380,31 +397,65 @@ class DataManager:
     def __init__(self, data_dir: str = "data_cache", cache_size: int = 50):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
-        self._cache = {}
+        from collections import OrderedDict
+        self._cache = OrderedDict()
         self._cache_size = cache_size
         self.fetcher = BinanceFuturesFetcher()
         self._last_sync = {}
         self._universe_cache = None
         self._last_universe_fetch = 0
         
+    def get_cached_symbols(self) -> List[str]:
+        """Returns all valid USDT perpetual symbols found in local data_cache."""
+        try:
+            if not os.path.exists(self.data_dir):
+                return []
+            files = os.listdir(self.data_dir)
+            symbols = set()
+            for f in files:
+                if f.endswith(".parquet") and "_" in f:
+                    sym = f.split("_")[0]
+                    if sym.endswith("USDT") and sym not in IGNORED_CRYPTO:
+                        symbols.add(sym)
+            return sorted(list(symbols))
+        except Exception as e:
+            logger.warning(f"Error reading cached symbols from disk: {e}")
+            return []
+
     def get_universe(self, top_n: int = 1000) -> List[str]:
         """Returns top N symbols by volume, cached for 10 minutes session-wide."""
         now = time.time()
-        if self._universe_cache is not None and (now - self._last_universe_fetch < 600):
-            return self._universe_cache
+        if self._universe_cache and (now - self._last_universe_fetch < 600):
+            return self._universe_cache[:top_n]
             
+        syms = []
         try:
             # Fetch absolute all or up to 1000
-            syms = self.fetcher.get_top_volume_symbols(top_n=top_n)
-            self._universe_cache = syms
-            self._last_universe_fetch = now
-            return syms
+            syms = self.fetcher.get_top_volume_symbols(top_n=1000)
         except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP Error fetching universe ({e.response.status_code}): {e}")
-            return MANDATORY_CRYPTO
+            status_code = getattr(e.response, 'status_code', 'Unknown')
+            logger.error(f"HTTP Error fetching universe ({status_code}): {e}")
         except Exception as e:
-            logger.error(f"Failed to fetch universe: {e}")
-            return MANDATORY_CRYPTO # Fallback
+            logger.error(f"Failed to fetch universe from Binance: {e}")
+            
+        if not syms:
+            # Fallback 1: Use locally cached symbols on disk
+            cached_syms = self.get_cached_symbols()
+            if cached_syms:
+                # Merge mandatory symbols with cached symbols
+                syms = sorted(list(set(MANDATORY_CRYPTO).union(cached_syms)))
+            else:
+                # Fallback 2: Mandatory crypto list
+                syms = list(MANDATORY_CRYPTO)
+            
+            # Temporary short cache (15s) so we retry network soon without pounding
+            self._universe_cache = syms
+            self._last_universe_fetch = now - 585
+            return syms[:top_n]
+            
+        self._universe_cache = syms
+        self._last_universe_fetch = now
+        return syms[:top_n]
         
     def _get_path(self, symbol: str, interval: str) -> str:
         return os.path.join(self.data_dir, f"{symbol}_{interval}.parquet")
@@ -424,6 +475,21 @@ class DataManager:
         if not os.path.exists(path):
             self.save_data(new_data, symbol, interval)
             return
+            
+        try:
+            # Efficiently read just the max open_time
+            existing_ts_df = pd.read_parquet(path, columns=['open_time'])
+            if not existing_ts_df.empty:
+                max_ts = existing_ts_df['open_time'].max()
+                new_min_ts = new_data['open_time'].min()
+                
+                if pd.Timestamp(new_min_ts) > pd.Timestamp(max_ts):
+                    # Fast path: strictly newer data, append directly
+                    new_data.to_parquet(path, engine='fastparquet', append=True, index=False)
+                    self.clear_cache(symbol, interval)
+                    return
+        except Exception as e:
+            logger.warning(f"Fast append check failed for {symbol}_{interval}, falling back to full merge: {e}")
             
         existing = pd.read_parquet(path)
             
@@ -489,7 +555,7 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error auto-syncing {symbol}_{interval}: {e}")
 
-    def load_data(self, symbol: str, interval: str, auto_sync: bool = True) -> Optional[pd.DataFrame]:
+    def load_data(self, symbol: str, interval: str, auto_sync: bool = True, include_realtime: bool = False) -> Optional[pd.DataFrame]:
         cache_key = f"{symbol}_{interval}"
         path = self._get_path(symbol, interval)
         
@@ -516,21 +582,23 @@ class DataManager:
                     df['open_time'] = pd.to_datetime(df['open_time']) + timedelta(hours=TIMEZONE_OFFSET)
                     if 'close_time' in df.columns:
                         df['close_time'] = pd.to_datetime(df['close_time']) + timedelta(hours=TIMEZONE_OFFSET)
-                # Simple LRU: if full, remove oldest (first inserted in dict)
-                if len(self._cache) >= self._cache_size:
-                    oldest_key = next(iter(self._cache))
-                    del self._cache[oldest_key]
-                    
+                # Simple LRU
                 self._cache[cache_key] = {
                     'data': df,
                     'mtime': os.path.getmtime(path)
                 }
+                self._cache.move_to_end(cache_key)
+                if len(self._cache) > self._cache_size:
+                    self._cache.popitem(last=False)
             except Exception as e:
                 logger.error(f"Error loading {path}: {e}")
                 return None
+        else:
+            # Move accessed item to end
+            self._cache.move_to_end(cache_key)
 
         # Append latest 1m data for realtime update
-        if df is not None and not df.empty and interval != '1m':
+        if include_realtime and df is not None and not df.empty and interval != '1m':
             try:
                 df_1m = self.fetcher.fetch_candles(symbol, '1m', limit=1)
                 if not df_1m.empty:

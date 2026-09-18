@@ -10,6 +10,7 @@ from src.data import DataManager
 from ml_engine.analysis.multivariate import MatrixEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.shared_state import get_manager, get_engine
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
@@ -245,7 +246,7 @@ def multivariate_analysis_ui():
 
 def multivariate_analysis_server(input, output, session):
 
-    manager = DataManager()
+    manager = get_manager()
     correlation_matrix = reactive.Value(pd.DataFrame())
     decomp_result = reactive.Value(None)
     

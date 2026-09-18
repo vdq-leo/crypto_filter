@@ -32,6 +32,7 @@ from ml_engine.predictive.predictor import IsotonicCalibrator, CalibratedModelWr
 from ml_engine.labeling.labeler import Labeler, TripleBarrierLabeler, StationarityLabeler, CombinedLabeler, TailSetLabeler
 from src.logger import logger
 from src.backtest import BacktestEngine
+from src.shared_state import get_manager, get_engine
 from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold   
 
 def meta_sizing_cal(meta_probs):
@@ -395,8 +396,8 @@ def predictive_ui():
     )
 
 def predictive_server(input, output, session):
-    manager = DataManager()
-    engine = MetricsEngine()
+    manager = get_manager()
+    engine = get_engine()
     
     # Reactive state
     inventory = reactive.Value({})

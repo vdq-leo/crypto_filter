@@ -9,6 +9,7 @@ from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, TRADINGVIEW_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.logger import logger
+from src.shared_state import get_manager, get_engine
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy import stats
 import requests
@@ -255,8 +256,8 @@ def market_radar_ui():
     )
 
 def market_radar_server(input, output, session, global_interval):
-    manager = DataManager()
-    engine = MetricsEngine()
+    manager = get_manager()
+    engine = get_engine()
     
     snapshot_data = reactive.Value(pd.DataFrame())
     rpg_data = reactive.Value(pd.DataFrame())
@@ -293,7 +294,7 @@ def market_radar_server(input, output, session, global_interval):
         try:
             n = int(input.n_assets_radar() or 20)
             try:
-                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+                syms = manager.get_universe(top_n=n)
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"Radar volume filter failed: {e}")
                 syms = []
@@ -318,7 +319,7 @@ def market_radar_server(input, output, session, global_interval):
             val = input.n_assets_rpg()
             n = int(val) if val else 20
             try:
-                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+                syms = manager.get_universe(top_n=n)
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"RPG volume filter failed: {e}")
                 syms = []
@@ -453,7 +454,10 @@ def market_radar_server(input, output, session, global_interval):
             interval = input.radar_interval()
             logger.log("Market Radar", "INFO", f"Using interval: {interval}")
             
-            symbols = list(input.radar_symbols())
+            symbols = list(input.radar_symbols() or [])
+            if not symbols:
+                symbols = sorted(list(selected_symbols_radar.get() or manager.get_universe(top_n=20) or MANDATORY_CRYPTO))
+                symbols = [s for s in symbols if s not in IGNORED_CRYPTO]
             logger.log("Market Radar", "INFO", f"Calculating metrics for {len(symbols)} symbols")
             
             if not symbols:

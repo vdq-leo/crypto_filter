@@ -6,6 +6,7 @@ import numpy as np
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
+from src.shared_state import get_manager, get_engine
 from ml_engine.modeling.factory import ModelFactory
 from ml_engine.modeling.feature_selection import FeatureSelector
 from ml_engine.predictive.predictor import IsotonicCalibrator, CalibratedModelWrapper
@@ -14,8 +15,8 @@ from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, ca
 from sklearn.linear_model import LogisticRegression
 
 router = APIRouter()
-manager = DataManager()
-engine = MetricsEngine()
+manager = get_manager()
+engine = get_engine()
 
 class PredictiveRequest(BaseModel):
     ticker: str = "BTCUSDT"

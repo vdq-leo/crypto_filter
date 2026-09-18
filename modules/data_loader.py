@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from src.data import BinanceFuturesFetcher, DataManager
 from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, DEFAULT_FETCH_INTERVALS
+from src.shared_state import get_manager, get_engine
 import asyncio
 import requests
 
@@ -109,7 +110,7 @@ def data_loader_ui():
 
 def data_loader_server(input, output, session):
     fetcher = BinanceFuturesFetcher()
-    manager = DataManager()
+    manager = get_manager()
     
     selected_symbols = reactive.Value(set(MANDATORY_CRYPTO))
     logs = reactive.Value([])
