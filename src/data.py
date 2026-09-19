@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timedelta
 from typing import List, Optional, Union, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import yfinance as yf
 
 # Import from config
 from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET, IGNORED_CRYPTO
@@ -258,6 +259,9 @@ class BinanceFuturesFetcher:
 
     def fetch_klines(self, symbol: str, interval: str, start_time: int = None, end_time: int = None, limit: int = None) -> pd.DataFrame:
         """Fetch klines for a single symbol"""
+        if symbol in ['QQQUSDT', 'SPYUSDT']:
+            return _fetch_yf_data(symbol, interval, start_ts=start_time, end_ts=end_time, limit=limit)
+            
         params = {'symbol': symbol, 'interval': interval}
         
         if start_time: params['startTime'] = start_time
@@ -293,6 +297,30 @@ class BinanceFuturesFetcher:
         Fetch full history by chunking with retries.
         Supports flexible time parameters similar to fetch_binance_data.
         """
+        if symbol in ['QQQUSDT', 'SPYUSDT', 'XAUUSDT', 'XAGUSDT']:
+            start_ts = None
+            end_ts = None
+            if start_time is None and end_time is None:
+                days = int(365 * years) if years > 0 else 3650  # Fetch 10 years by default for YF assets
+                start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+                end_ts = int(datetime.now().timestamp() * 1000)
+            else:
+                if end_time is None:
+                    end_ts = int(datetime.now().timestamp() * 1000)
+                elif isinstance(end_time, (str, datetime)):
+                    end_ts = int(pd.to_datetime(end_time).timestamp() * 1000)
+                else:
+                    end_ts = int(end_time)
+
+                if isinstance(start_time, (str, datetime)):
+                    start_ts = int(pd.to_datetime(start_time).timestamp() * 1000)
+                elif start_time is not None:
+                    start_ts = int(start_time)
+                else:
+                    days = int(365 * years) if years > 0 else 3650
+                    start_ts = int((pd.to_datetime(end_ts, unit='ms') - timedelta(days=days)).timestamp() * 1000)
+            return _fetch_yf_data(symbol, interval, start_ts=start_ts, end_ts=end_ts)
+            
         # Calculate start_ts and end_ts in milliseconds
         if start_time is None and end_time is None:
             # use years if provided, else default to some recent period
@@ -362,6 +390,9 @@ class BinanceFuturesFetcher:
         """
         Fetch exactly N candles by chunking backwards from current time.
         """
+        if symbol in ['QQQUSDT', 'SPYUSDT']:
+            return _fetch_yf_data(symbol, interval, limit=limit)
+            
         all_dfs = []
         current_end = int(datetime.now().timestamp() * 1000)
         remaining = limit
@@ -537,9 +568,14 @@ class DataManager:
             end_t = datetime.now()
             
             if not first_ts:
-                # No data: fetch 30 days
-                logger.info(f"Auto-sync: Fetching initial 30 days for {symbol} ({interval})")
-                requested_start = end_t - timedelta(days=30)
+                # No data: fetch 30 days (or 10 years for YF assets)
+                if symbol in ['QQQUSDT', 'SPYUSDT', 'XAUUSDT', 'XAGUSDT']:
+                    days_to_fetch = 3650
+                else:
+                    days_to_fetch = 30
+                    
+                logger.info(f"Auto-sync: Fetching initial {days_to_fetch} days for {symbol} ({interval})")
+                requested_start = end_t - timedelta(days=days_to_fetch)
                 df = self.fetcher.fetch_history(symbol, interval, start_time=requested_start, end_time=end_t)
                 if not df.empty:
                     self.save_data(df, symbol, interval)
@@ -707,3 +743,67 @@ class DataManager:
                 except Exception as e:
                     logger.error(f"Error reading metadata for {f}: {e}")
         return metadata
+
+def _fetch_yf_data(symbol: str, interval: str, start_ts: int = None, end_ts: int = None, limit: int = None) -> pd.DataFrame:
+    yf_sym_map = {
+        'XAUUSDT': 'GC=F',
+        'XAGUSDT': 'SI=F',
+        'QQQUSDT': 'QQQ',
+        'SPYUSDT': 'SPY'
+    }
+    yf_sym = yf_sym_map.get(symbol, symbol.replace("USDT", ""))
+    
+    interval_map = {
+        '1m': '1m', '3m': '2m', '5m': '5m', '15m': '15m', '30m': '30m',
+        '1h': '1h', '2h': '1h', '4h': '1h', '6h': '1h', '8h': '1h', '12h': '1h',
+        '1d': '1d', '3d': '1d', '1w': '1wk'
+    }
+    yf_interval = interval_map.get(interval, '1d')
+    
+    ticker = yf.Ticker(yf_sym)
+    
+    try:
+        if start_ts and end_ts:
+            start_date = pd.to_datetime(start_ts, unit='ms')
+            end_date = pd.to_datetime(end_ts, unit='ms')
+            df = ticker.history(start=start_date, end=end_date, interval=yf_interval)
+        elif limit:
+            if yf_interval in ['1m', '2m', '5m', '15m', '30m', '1h', '90m']:
+                df = ticker.history(period="730d", interval=yf_interval)
+            else:
+                df = ticker.history(period="max", interval=yf_interval)
+            if not df.empty:
+                df = df.tail(limit)
+        else:
+            df = ticker.history(period="max", interval=yf_interval)
+    except Exception as e:
+        logger.error(f"Failed to fetch YF data for {yf_sym}: {e}")
+        return pd.DataFrame()
+        
+    if df.empty:
+        return pd.DataFrame()
+        
+    df = df.reset_index()
+    date_col = df.columns[0]
+    df = df.rename(columns={
+        date_col: 'open_time',
+        'Open': 'open',
+        'High': 'high',
+        'Low': 'low',
+        'Close': 'close',
+        'Volume': 'volume'
+    })
+    
+    # Check if tz-aware
+    if df['open_time'].dt.tz is not None:
+        df['open_time'] = df['open_time'].dt.tz_convert('UTC').dt.tz_localize(None)
+        
+    # Normalize to midnight to align with Binance daily candles
+    if interval_map.get(interval, '1d') in ['1d', '1wk']:
+        df['open_time'] = df['open_time'].dt.normalize()
+        
+    df = df.drop_duplicates(subset=['open_time'], keep='last')
+        
+    df['quote_volume'] = df['close'] * df['volume']
+    
+    return df[['open_time', 'open', 'high', 'low', 'close', 'volume', 'quote_volume']]

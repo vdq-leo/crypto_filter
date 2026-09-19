@@ -19,26 +19,31 @@ def portfolio_allocation_ui():
                         "pa_symbols",
                         "Select Tickers",
                         choices=MANDATORY_CRYPTO,
-                        selected=MANDATORY_CRYPTO[:5],
+                        selected=MANDATORY_CRYPTO,
                         multiple=True
                     ),
+                    ui.input_select("pa_estimation_method", "Estimation Model", choices=["OLS (Horizon-Shifted)", "Historical"], selected="OLS (Horizon-Shifted)"),
                     ui.input_select("pa_interval", "Interval", choices=AVAILABLE_INTERVALS, selected="1d"),
-                    ui.input_numeric("pa_horizon", "Target Holding Time (h)", value=7, min=1),
-                    ui.input_numeric("pa_short_window", "Short Window", value=14, min=2),
-                    ui.input_numeric("pa_long_window", "Long Window", value=60, min=10),
+                    ui.input_numeric("pa_horizon", "Target Holding Time (h)", value=30, min=1),
+                    ui.input_numeric("pa_short_window", "Short Window", value=20, min=2),
+                    ui.input_numeric("pa_long_window", "Long Window", value=180, min=10),
                     ui.input_slider("pa_corr_alpha", "Correlation Alpha (Short Weight)", min=0.0, max=1.0, value=0.4, step=0.05),
                     ui.input_slider("pa_split_ratio", "Train/Test Split", min=0.1, max=0.9, value=0.6, step=0.05),
                     
                     ui.input_action_button("btn_pa_estimate", "Estimate Parameters", class_="btn-primary w-100 mt-3")
                 ),
                 ui.card(
-                    ui.card_header("Horizon-Shifted OLS Estimates"),
+                    ui.card_header("Parameter Estimates"),
                     ui.output_ui("pa_estimation_grid"),
                     ui.p("Note: Manually overriding expected volatility here will trigger a full covariance matrix rebuild (D*C*D).", class_="text-muted mt-2")
                 ),
                 ui.card(
                     ui.card_header("Validation Metrics (Out-of-Sample)"),
-                    ui.output_data_frame("pa_validation_metrics")
+                    ui.output_table("pa_validation_metrics")
+                ),
+                ui.card(
+                    ui.card_header("Correlation Matrix"),
+                    ui.output_table("pa_correlation_matrix")
                 )
             )
         ),
@@ -49,9 +54,10 @@ def portfolio_allocation_ui():
                     ui.input_select(
                         "pa_opt_method", 
                         "Objective", 
-                        choices={"max_sharpe": "Max Sharpe", "min_variance": "Min Variance", "risk_parity": "Risk Parity"},
+                        choices={"max_sharpe": "Max Sharpe", "min_variance": "Min Variance", "risk_parity": "Risk Parity", "herc": "HERC", "hrp": "HRP"},
                         selected="max_sharpe"
                     ),
+                    ui.input_numeric("pa_total_value", "Total Portfolio Value (USDT)", value=10000.0, min=0.0, step=1000.0),
                     ui.input_numeric("pa_risk_free", "Risk-Free Rate (Annual %)", value=0.0, step=1.0),
                     ui.input_numeric("pa_target_vol", "Target Volatility (Annual %)", value=15.0, min=1.0, step=1.0),
                     
@@ -61,6 +67,10 @@ def portfolio_allocation_ui():
                     ui.input_numeric("pa_max_weight", "Max Weight (if Long Only)", value=1.0, min=0.0, max=1.0, step=0.05),
                     
                     ui.input_action_button("btn_pa_optimize", "Optimize Portfolio", class_="btn-success w-100 mt-3")
+                ),
+                ui.card(
+                    ui.card_header("Assets to Optimize"),
+                    ui.output_ui("pa_opt_asset_selector")
                 ),
                 ui.layout_columns(
                     ui.card(
@@ -75,7 +85,7 @@ def portfolio_allocation_ui():
                 ),
                 ui.card(
                     ui.card_header("Allocation Details"),
-                    ui.output_data_frame("pa_allocation_table")
+                    ui.output_table("pa_allocation_table")
                 )
             )
         )
@@ -91,10 +101,33 @@ def portfolio_allocation_server(input, output, session):
     manual_vol = reactive.Value({})
     
     @reactive.Effect
+    def _populate_pa_symbols():
+        try:
+            if input.main_nav() == "PORTFOLIO_ALLOCATION":
+                res = requests.get(f"{API_BASE_URL}/data/metadata")
+                if res.status_code == 200:
+                    metadata = res.json().get("metadata", [])
+                    cached_syms = list(set([m["ticker"] for m in metadata if m["ticker"].endswith("USDT") and m["ticker"] not in IGNORED_CRYPTO]))
+                else:
+                    cached_syms = []
+                
+                all_syms = sorted(list(set(cached_syms).union(MANDATORY_CRYPTO)))
+                
+                with reactive.isolate():
+                    curr_sel = list(input.pa_symbols())
+                    if not curr_sel:
+                        curr_sel = list(MANDATORY_CRYPTO)
+                
+                ui.update_selectize("pa_symbols", choices=all_syms, selected=curr_sel, server=True)
+        except Exception as e:
+            logger.log("Portfolio", "ERROR", f"Failed to populate symbols: {e}")
+
+    @reactive.Effect
     @reactive.event(input.btn_pa_estimate)
     def handle_estimate():
         req_data = {
             "symbols": list(input.pa_symbols()),
+            "estimation_method": "historical" if input.pa_estimation_method() == "Historical" else "ols",
             "interval": input.pa_interval(),
             "target_horizon": input.pa_horizon(),
             "short_window": input.pa_short_window(),
@@ -136,6 +169,7 @@ def portfolio_allocation_server(input, output, session):
             er = metrics['expected_return']
             vol = metrics['expected_volatility']
             mdd = metrics['expected_maxdd']
+            n_obs = metrics.get('n_obs', 0)
             
             # Using raw HTML inputs for editing, tied to reactive updates via JS or just read at optimize time.
             # For simplicity in V1, we'll display a static table and allow sliders/inputs if we wanted, 
@@ -145,7 +179,8 @@ def portfolio_allocation_server(input, output, session):
                 ui.tags.td(sym, class_="fw-bold"),
                 ui.tags.td(ui.input_numeric(f"er_{sym}", "", value=round(er, 6), step=0.001, width="100px")),
                 ui.tags.td(ui.input_numeric(f"vol_{sym}", "", value=round(vol, 6), step=0.001, min=0.0, width="100px")),
-                ui.tags.td(f"{mdd:.4f}")
+                ui.tags.td(f"{mdd:.4f}"),
+                ui.tags.td(str(n_obs))
             )
             rows.append(row)
             
@@ -153,17 +188,19 @@ def portfolio_allocation_server(input, output, session):
             ui.tags.thead(
                 ui.tags.tr(
                     ui.tags.th("Asset"),
-                    ui.tags.th("Exp. Return (Er)"),
-                    ui.tags.th("Exp. Volatility"),
-                    ui.tags.th("Exp. Max DD (Diag)")
+                    ui.tags.th("Exp. Return (Annualized)"),
+                    ui.tags.th("Exp. Volatility (Annualized)"),
+                    ui.tags.th("Exp. Max DD (Diag)"),
+                    ui.tags.th("Observations")
                 )
             ),
             ui.tags.tbody(*rows),
-            class_="table table-striped table-sm align-middle"
+            class_="table table-dark table-hover table-sm align-middle",
+            style="table-layout: fixed; width: 100%;"
         )
         return table
         
-    @render.data_frame
+    @render.table
     def pa_validation_metrics():
         data = est_results.get()
         if not data:
@@ -184,9 +221,99 @@ def portfolio_allocation_server(input, output, session):
             })
             
         df = pd.DataFrame(rows)
-        return render.DataGrid(df.round(4))
+        styled = (df.style
+            .hide(axis="index")
+            .format(precision=4)
+            .set_table_attributes('class="table table-dark table-hover table-sm align-middle" style="table-layout: fixed; width: 100%;"')
+        )
+        return styled
+        
+    @render.ui
+    def pa_correlation_matrix():
+        data = est_results.get()
+        if not data or 'correlation' not in data:
+            return ui.p("No correlation data available.")
+            
+        corr_dict = data['correlation']
+        df = pd.DataFrame(corr_dict)
+        symbols = df.columns
+        
+        def val_to_color(val):
+            val = max(min(float(val), 1.0), -1.0)
+            if val < 0:
+                r, g, b = 255, int(255 * (1 + val)), 0
+            else:
+                r, g, b = int(255 * (1 - val)), 255, 0
+            return f"rgba({r}, {g}, {b}, 0.5)"
+            
+        rows = []
+        for r_sym in symbols:
+            cells = [ui.tags.td(r_sym, class_="fw-bold align-middle")]
+            for c_sym in symbols:
+                val = df.loc[r_sym, c_sym]
+                bg_color = val_to_color(val)
+                input_id = f"corr_{r_sym}_{c_sym}"
+                
+                inp = ui.tags.div(
+                    ui.input_numeric(input_id, "", value=round(val, 3), step=0.01, min=-1.0, max=1.0, width="75px"),
+                    style="margin: 0; padding: 0;"
+                )
+                cells.append(ui.tags.td(inp, style=f"background-color: {bg_color}; vertical-align: middle; padding: 2px;"))
+            rows.append(ui.tags.tr(*cells))
+            
+        header_cells = [ui.tags.th("Asset")] + [ui.tags.th(s, style="font-size: 0.8em;") for s in symbols]
+        table = ui.tags.table(
+            ui.tags.thead(ui.tags.tr(*header_cells)),
+            ui.tags.tbody(*rows),
+            class_="table table-dark table-sm text-center",
+            style="table-layout: fixed; width: 100%;"
+        )
+        return table
         
     
+    @render.ui
+    def pa_opt_asset_selector():
+        data = est_results.get()
+        if not data:
+            return ui.p("Please run estimation in State 1 first.", class_="text-muted")
+            
+        assets = data['assets']
+        
+        rows = []
+        for sym, metrics in assets.items():
+            try:
+                er_val = getattr(input, f"er_{sym}")()
+                vol_val = getattr(input, f"vol_{sym}")()
+            except Exception:
+                er_val = None
+                vol_val = None
+            
+            er = float(er_val) if er_val is not None else metrics['expected_return']
+            vol = float(vol_val) if vol_val is not None else metrics['expected_volatility']
+            
+            row = ui.tags.tr(
+                ui.tags.td(ui.input_checkbox(f"asset_include_{sym}", "", value=True)),
+                ui.tags.td(sym, class_="fw-bold"),
+                ui.tags.td(f"{er:.4f}"),
+                ui.tags.td(f"{vol:.4f}")
+            )
+            rows.append(row)
+            
+        table = ui.tags.table(
+            ui.tags.thead(
+                ui.tags.tr(
+                    ui.tags.th("Include"),
+                    ui.tags.th("Asset"),
+                    ui.tags.th("Expected Return"),
+                    ui.tags.th("Expected Volatility")
+                )
+            ),
+            ui.tags.tbody(*rows),
+            class_="table table-dark table-hover table-sm align-middle",
+            style="table-layout: fixed; width: 100%;"
+        )
+        return table
+        
     @reactive.Effect
     @reactive.event(input.btn_pa_optimize)
     def handle_optimize():
@@ -200,17 +327,54 @@ def portfolio_allocation_server(input, output, session):
         # Read overrides from UI
         mu = {}
         vol = {}
+        included_symbols = []
         for sym in symbols:
-            # We access the input values dynamically
-            er_val = getattr(input, f"er_{sym}")()
-            vol_val = getattr(input, f"vol_{sym}")()
+            try:
+                inc = getattr(input, f"asset_include_{sym}")()
+            except Exception:
+                inc = True
+                
+            if not inc:
+                continue
+                
+            included_symbols.append(sym)
+            try:
+                er_val = getattr(input, f"er_{sym}")()
+                vol_val = getattr(input, f"vol_{sym}")()
+            except Exception:
+                er_val = None
+                vol_val = None
+                
             mu[sym] = float(er_val) if er_val is not None else data['assets'][sym]['expected_return']
             vol[sym] = float(vol_val) if vol_val is not None else data['assets'][sym]['expected_volatility']
             
+        if len(included_symbols) < 2:
+            ui.notification_show("Please select at least 2 assets for optimization.", type="warning")
+            return
+            
         # Rebuild full covariance matrix (D * C * D)
         corr_matrix = pd.DataFrame(data['correlation'])
+        
+        # Read correlation overrides
+        for r_sym in included_symbols:
+            for c_sym in included_symbols:
+                try:
+                    c_val = getattr(input, f"corr_{r_sym}_{c_sym}")()
+                    if c_val is not None:
+                        corr_matrix.loc[r_sym, c_sym] = float(c_val)
+                except Exception:
+                    pass
+                    
+        # Force symmetry by averaging in case user only edited one side
+        corr_matrix = (corr_matrix + corr_matrix.T) / 2.0
+        
+        # Ensure diagonals are 1.0
+        for sym in corr_matrix.columns:
+            corr_matrix.loc[sym, sym] = 1.0
+        
+        corr_matrix = corr_matrix.loc[included_symbols, included_symbols]
         vols_series = pd.Series(vol)
-        symbols = corr_matrix.columns
+        symbols = included_symbols
         D = np.diag(vols_series.reindex(symbols).fillna(0.0).values)
         C = corr_matrix.values
         Sigma = D @ C @ D
@@ -332,7 +496,7 @@ def portfolio_allocation_server(input, output, session):
         )
         return fig
         
-    @render.data_frame
+    @render.table
     def pa_allocation_table():
         data = opt_results.get()
         if not data:
@@ -341,15 +505,83 @@ def portfolio_allocation_server(input, output, session):
         rel_w = data['relative_weights']
         final_w = data['final_weights']
         rc = data['risk_contributions']
+        total_val = input.pa_total_value()
+        total_val = float(total_val) if total_val is not None else 10000.0
+        
+        est_data = est_results.get()
         
         rows = []
         for sym in rel_w.keys():
+            try:
+                er_val = getattr(input, f"er_{sym}")()
+                vol_val = getattr(input, f"vol_{sym}")()
+            except Exception:
+                er_val = None
+                vol_val = None
+                
+            base_er = est_data['assets'][sym]['expected_return'] if est_data else 0.0
+            base_vol = est_data['assets'][sym]['expected_volatility'] if est_data else 0.0
+            
+            er = float(er_val) if er_val is not None else base_er
+            vol = float(vol_val) if vol_val is not None else base_vol
+            
             rows.append({
                 "Asset": sym,
+                "Exp. Return": er,
+                "Exp. Volatility": vol,
                 "Relative Weight": rel_w[sym],
                 "Final Weight": final_w[sym],
+                "Allocation (USDT)": final_w[sym] * total_val,
                 "Risk Contribution": rc.get(sym, 0.0)
             })
             
+        sum_final = sum(final_w.values())
+        cash_weight = max(1.0 - sum_final, 0.0)
+        
+        risk_free_input = input.pa_risk_free()
+        risk_free = float(risk_free_input) / 100.0 if risk_free_input is not None else 0.0
+        
+        if cash_weight > 0.0001:
+            rows.append({
+                "Asset": "CASH",
+                "Exp. Return": risk_free,
+                "Exp. Volatility": 0.0,
+                "Relative Weight": 0.0,
+                "Final Weight": cash_weight,
+                "Allocation (USDT)": cash_weight * total_val,
+                "Risk Contribution": 0.0
+            })
+            
+        er_port = data['metrics']['portfolio_return_final']
+        if cash_weight > 0.0001:
+            er_port += cash_weight * risk_free
+            
+        pre_scaled_vol = data['metrics']['pre_scaled_volatility']
+        final_vol = pre_scaled_vol * sum_final
+        
+        rows.append({
+            "Asset": "TOTAL",
+            "Exp. Return": er_port,
+            "Exp. Volatility": final_vol,
+            "Relative Weight": sum(rel_w.values()),
+            "Final Weight": sum_final + cash_weight,
+            "Allocation (USDT)": total_val,
+            "Risk Contribution": sum(rc.values())
+        })
+            
         df = pd.DataFrame(rows)
-        return render.DataGrid(df.round(4))
+        
+        def highlight_total(s):
+            if s['Asset'] == 'TOTAL':
+                return ['background-color: rgba(255, 255, 255, 0.15); font-weight: bold; border-top: 2px solid white;'] * len(s)
+            elif s['Asset'] == 'CASH':
+                return ['color: #a0aec0; font-style: italic;'] * len(s)
+            return [''] * len(s)
+            
+        styled = (df.style
+            .hide(axis="index")
+            .apply(highlight_total, axis=1)
+            .format(precision=4)
+            .set_table_attributes('class="table table-dark table-hover table-sm align-middle" style="table-layout: fixed; width: 100%;"')
+        )
+        return styled

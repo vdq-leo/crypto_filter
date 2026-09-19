@@ -20,3 +20,6 @@ uvicorn
 shap
 backtrader
 numbajinja2
+
+Riskfolio-Lib
+yfinance

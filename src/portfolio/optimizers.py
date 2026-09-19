@@ -2,6 +2,14 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from typing import Tuple, Dict, List
+import riskfolio as rp
+
+# Monkey-patch Riskfolio-Lib 7.3.0 HERC linkage bug
+if hasattr(rp.HCPortfolio, '_hierarchical_recursive_bisection'):
+    original_hrb = rp.HCPortfolio._hierarchical_recursive_bisection
+    def patched_hrb(self, Z, rm="MV", rf=0, linkage=None, model="HERC", upper_bound=None, lower_bound=None):
+        return original_hrb(self, Z, rm=rm, rf=rf, model=model)
+    rp.HCPortfolio._hierarchical_recursive_bisection = patched_hrb
 
 class PortfolioOptimizer:
     def __init__(self, expected_returns: pd.Series, covariance_matrix: pd.DataFrame, risk_free_rate: float = 0.0, bounds: Tuple[float, float] = (0.0, 1.0)):
@@ -123,6 +131,37 @@ class PortfolioOptimizer:
             return pd.Series(init_guess, index=self.assets)
             
         return pd.Series(result.x, index=self.assets)
+
+    def hierarchical_optimization(self, model: str = 'HERC') -> pd.Series:
+        """
+        Uses Riskfolio-Lib to compute Hierarchical Equal Risk Contribution (HERC) or Hierarchical Risk Parity (HRP).
+        """
+        # Create a mock returns dataframe to initialize HCPortfolio (needed for internal shape/index logic)
+        mock_returns = pd.DataFrame(np.random.randn(500, self.n_assets), columns=self.assets)
+        port = rp.HCPortfolio(returns=mock_returns)
+        
+        # Override with our covariance and codependence matrices
+        cov_df = pd.DataFrame(self.cov, index=self.assets, columns=self.assets)
+        vols = np.sqrt(np.diag(self.cov))
+        # Handle zero vol case safely for correlation matrix
+        with np.errstate(divide='ignore', invalid='ignore'):
+            corr = self.cov / np.outer(vols, vols)
+            corr[np.isnan(corr)] = 0.0
+            
+        corr_df = pd.DataFrame(corr, index=self.assets, columns=self.assets)
+        
+        port.cov = cov_df
+        port.codep = corr_df
+        
+        try:
+            w = port.optimization(model=model, rm='MV', rf=self.rf)
+            if w is None or w.empty:
+                raise ValueError("Riskfolio returned empty weights")
+            return pd.Series(w['weights'].values, index=self.assets)
+        except Exception as e:
+            print(f"{model} optimization failed: {e}")
+            # Fallback to equal weight
+            return pd.Series([1.0 / self.n_assets] * self.n_assets, index=self.assets)
 
     def generate_efficient_frontier(self, num_points: int = 50) -> Dict[str, List[float]]:
         """

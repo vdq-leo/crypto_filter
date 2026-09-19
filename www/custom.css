@@ -441,7 +441,11 @@ table,
 .bslib-card .table,
 .navset-card-underline .table,
 .card-body .table,
-.shiny-output-table table {
+.shiny-output-table table,
+.table tr,
+.table td,
+.shiny-datagrid tr,
+.shiny-datagrid td {
     border: 2px solid var(--border-color) !important;
     border-collapse: collapse !important;
     background-color: transparent !important;
