@@ -22,6 +22,7 @@ from modules.multivariate_analysis import multivariate_analysis_ui, multivariate
 from modules.activity_logs import activity_logs_ui, activity_logs_server
 from modules.symbol_diagnostics import symbol_diagnostics_ui, symbol_diagnostics_server
 from modules.pair_radar import pair_radar_ui, pair_radar_server
+from modules.portfolio_allocation import portfolio_allocation_ui, portfolio_allocation_server
 from src.config import BENCHMARK_SYMBOL, API_BASE_URL
 from datetime import datetime, timedelta
 
@@ -92,6 +93,7 @@ app_ui = ui.page_navbar(
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
     ui.nav_panel("MULTIVARIATE", multivariate_analysis_ui()),
     ui.nav_panel("PAIR_RADAR", pair_radar_ui()),
+    ui.nav_panel("PORTFOLIO_ALLOCATION", portfolio_allocation_ui()),
     ui.nav_panel("PREDICTIVE", predictive_ui()),
     ui.nav_panel("ACTIVITY_LOGS", activity_logs_ui()),
 
@@ -234,6 +236,7 @@ def server(input, output, session):
     predictive_server(input, output, session)
     multivariate_analysis_server(input, output, session)
     pair_radar_server(input, output, session, global_interval)
+    portfolio_allocation_server(input, output, session)
     symbol_diagnostics_server(input, output, session, global_interval)
     activity_logs_server(input, output, session)
 
