@@ -10,9 +10,10 @@ from statsmodels.tsa.stattools import coint, adfuller
 from scipy import stats
 from scipy.stats import gaussian_kde, rankdata
 from src.metrics import MetricsEngine, copula_cond_probs
-from src.config import AVAILABLE_INTERVALS
+from src.config import AVAILABLE_INTERVALS, API_BASE_URL
 from src.logger import logger
 from src.shared_state import get_manager, get_engine
+import requests
 
 def _sanitize(data):
     """Replace inf/nan with 0 to prevent Plotly JSON serialization errors."""
@@ -188,129 +189,46 @@ def pair_radar_server(input, output, session, global_interval):
         if not sym_a or not sym_b:
             return
 
-        with ui.Progress(min=0, max=3) as p:
-            p.set(1, message="Loading data...")
-            df_a = manager.load_data(sym_a, interval)
-            df_b = manager.load_data(sym_b, interval)
+        with ui.Progress(min=0, max=100) as p:
+            p.set(20, message="Fetching pair data from API...")
             
-            if df_a is None or df_b is None or df_a.empty or df_b.empty:
-                ui.notification_show("Data missing for symbols", type="error")
-                return
-
-            p.set(2, message="Generating synthetic series...")
-            df_a = df_a.set_index("open_time")
-            df_b = df_b.set_index("open_time")
-            common = df_a.index.intersection(df_b.index)
-            
-            if len(common) < window:
-                ui.notification_show("Insufficient common data", type="warning")
-                return
-            common = common[-(window + input.pair_window()):]
-            df_a = df_a.loc[common]
-            df_b = df_b.loc[common]
-
-            # Prepare prices for regression and synthetic series
-            # Only use log for price columns, avoid volume/quoteVolume (can be 0)
-            price_cols = ['open', 'high', 'low', 'close']
-            
-            # Ensure no zeroes/negatives before log
-            df_a[price_cols] = df_a[price_cols].clip(lower=1e-9)
-            df_b[price_cols] = df_b[price_cols].clip(lower=1e-9)
-
-            # Store raw prices for ratio mode before log-transform
-            raw_a = df_a.copy()
-            raw_b = df_b.copy()
-
-            df_a[price_cols] = np.log(df_a[price_cols])
-            df_b[price_cols] = np.log(df_b[price_cols])
-
-            synthetic = pd.DataFrame(index=common)
-            
-            if df_b["close"].std() == 0:
-                ui.notification_show("Asset B has zero variance. Cannot calculate regression.", type="error")
-                return
-
-            slope, intercept, r_val, p_val, std_err = stats.linregress(df_b["close"], df_a["close"])
-            beta = slope
-            
-            if mode == "ratio":
-                synthetic["open"] = raw_a["open"] / raw_b["open"]
-                synthetic["high"] = raw_a["high"] / raw_b["high"]
-                synthetic["low"] = raw_a["low"] / raw_b["low"]
-                synthetic["close"] = raw_a["close"] / raw_b["close"]
-
-            else: # spread
-                synthetic["open"] = df_a["open"] - (intercept + beta * df_b["open"])
-                synthetic["high"] = df_a["high"] - (intercept + beta * df_b["high"])
-                synthetic["low"] = df_a["low"] - (intercept + beta * df_b["low"])
-                synthetic["close"] = df_a["close"] - (intercept + beta * df_b["close"])
-
-            synthetic["low"] = synthetic.min(axis=1)
-            synthetic["high"] = synthetic.max(axis=1)
-                
-            # Store raw prices and returns for Comparison and Copula
-            synthetic["price_a"] = df_a["close"]
-            synthetic["price_b"] = df_b["close"]
-            synthetic["log_ret_a"] = df_a["close"].diff()
-            synthetic["log_ret_b"] = df_b["close"].diff()
-            vol_Ratio = synthetic["log_ret_a"].std() / synthetic["log_ret_b"].std()
-
-            # Cumulative Returns (indexed to 1.0)
-            synthetic["cum_ret_a"] = np.exp(df_a["close"] - df_a["close"].iloc[0])
-            synthetic["cum_ret_b"] = np.exp(df_b["close"] - df_b["close"].iloc[0])
-
-            p.set(3, message="Computing pair metrics...")
-
-            y = df_a["close"].values
-            x = df_b["close"].values
-
-            residuals = y - (slope * x + intercept)
-
-            if residuals.var() == 0:
-                adf_stat, adf_p = 0, 0
-            else:
-                adf_stat, adf_p, _, _, _, _ = adfuller(residuals)
-
-            spread = residuals[-window:]
-            spread_vol = np.std(spread) * np.sqrt(MetricsEngine.get_annual_scaling(interval))
-
-            spread_lag = spread[:-1]
-            spread_ret = np.diff(spread)
-            lambda_coef = np.polyfit(spread_lag, spread_ret, 1)[0]
-            half_life = -np.log(2) / lambda_coef if lambda_coef < 0 else np.nan
-
-            beta_stability = np.nan
-            roll_window = window
-            if len(y) > roll_window:
-                s_y = pd.Series(y)
-                s_x = pd.Series(x)
-                cov_xy = s_y.rolling(roll_window).cov(s_x)
-                var_x = s_x.rolling(roll_window).var().replace(0, 1e-9)
-                rolling_beta = cov_xy / var_x
-                beta_stability = np.nanstd(rolling_beta.values)
-
-            # Local zscore for SignalRate metric
-            z_local = calculate_rolling_zscore(synthetic["close"], window)
-            z_vals = z_local.dropna().values
-            p_correlation = np.corrcoef(x, y)[0, 1]
-            r_correlation = np.corrcoef(synthetic["log_ret_a"].dropna(), synthetic["log_ret_b"].dropna())[0, 1]
-
-            r2 = r_val**2
-
-            met = {
-                "Coefficient": slope,
-                "VolRatio": vol_Ratio,
-                "HalfLife": half_life,
-                "SpreadVol": spread_vol,
-                "BetaStability": beta_stability,
-                "P_Correlation": p_correlation,
-                "R_Correlation": r_correlation,
-                "ADF_P": adf_p,
-                "R2": r2
+            payload = {
+                "symbol_a": sym_a,
+                "symbol_b": sym_b,
+                "interval": interval,
+                "mode": mode,
+                "rolling_window": window,
+                "pair_window": input.pair_window(),
+                "copula_mode": input.copula_mode(),
+                "copula_type": input.copula_type(),
+                "copula_param": input.copula_param(),
+                "r_window": int(input.r_window() or 1),
+                "copula_stationarize": input.copula_stationarize(),
+                "copula_ema_window": input.copula_ema_window()
             }
-
-            pair_data.set(synthetic)
-            metrics_res.set(met)
+            
+            try:
+                res = requests.post(f"{API_BASE_URL}/pair_radar/generate", json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    
+                    chart_data = data.get("chart_data", [])
+                    if chart_data:
+                        synthetic = pd.DataFrame(chart_data)
+                        if "open_time" in synthetic.columns:
+                            synthetic["open_time"] = pd.to_datetime(synthetic["open_time"])
+                            synthetic = synthetic.set_index("open_time")
+                        
+                        pair_data.set(synthetic)
+                    
+                    metrics_res.set(data.get("metrics", {}))
+                    
+                    p.set(100, message="Complete")
+                else:
+                    ui.notification_show(f"Calculation error: {res.text}", type="error")
+            except Exception as e:
+                logger.log("Pair Radar", "ERROR", f"API Error: {e}")
+                ui.notification_show(f"API Connection error: {str(e)}", type="error")
 
     @render_widget
     def pair_main_chart():
@@ -325,18 +243,6 @@ def pair_radar_server(input, output, session, global_interval):
         df = df.tail(input.pair_window() + window)
 
 
-        # Recalculate rolling stats in real-time
-        df['zscore'] = calculate_rolling_zscore(df['close'], window)
-        df['ema'] = df['close'].rolling(window).mean()
-        df['ema_std'] = df['close'].ewm(window).std()
-        df['bb_upper'] = df['ema'] + 1.8 * df['ema_std']
-        df['bb_lower'] = df['ema'] - 1.8 * df['ema_std']
-        
-        # Correlations (Ret & Price)
-        df['corr_pearson'] = df["log_ret_a"].rolling(window).corr(df["log_ret_b"])
-        df['corr_pearson_price'] = df["price_a"].rolling(window).corr(df["price_b"])
-
-        # Truncate for display
         df = df.tail(input.pair_window())
 
         fig = make_subplots(
@@ -738,12 +644,7 @@ def pair_radar_server(input, output, session, global_interval):
         df_plot.index = pd.to_datetime(df_plot.index)
         df_plot.index = df_plot.index.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Calculate real-time correlations
-        df_plot['corr_pearson'] = df_plot["log_ret_a"].rolling(window).corr(df_plot["log_ret_b"])
-        df_plot['corr_pearson_price'] = df_plot["price_a"].rolling(window).corr(df_plot["price_b"])
-
-        # Truncate for display
-        df_plot = df_plot.tail(input.pair_window())
+        df_plot = df.tail(input.pair_window()).copy()
 
         # Use pre-calculated log returns for scaling comparison
         ret_a = df_plot["log_ret_a"].dropna()

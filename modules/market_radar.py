@@ -5,12 +5,8 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from src.data import DataManager
-from src.metrics import MetricsEngine
-from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, TRADINGVIEW_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, TRADINGVIEW_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
 from src.logger import logger
-from src.shared_state import get_manager, get_engine
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from scipy import stats
 import requests
 
@@ -58,7 +54,7 @@ def market_radar_ui():
                         "x_axis",
                         "X Axis",
                         choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected="rel_strength_z"
+                        selected="mr_prob"
                     ),
 
                     ui.input_select(
@@ -256,9 +252,6 @@ def market_radar_ui():
     )
 
 def market_radar_server(input, output, session, global_interval):
-    manager = get_manager()
-    engine = get_engine()
-    
     snapshot_data = reactive.Value(pd.DataFrame())
     rpg_data = reactive.Value(pd.DataFrame())
     selected_symbol_data = reactive.Value(None)
@@ -279,7 +272,8 @@ def market_radar_server(input, output, session, global_interval):
         if not selected_symbols_radar.get():
             try:
                 n = int(input.n_assets_radar() or 20)
-                syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+                syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"Initial symbol sync failed: {e}")
                 syms = []
@@ -294,7 +288,8 @@ def market_radar_server(input, output, session, global_interval):
         try:
             n = int(input.n_assets_radar() or 20)
             try:
-                syms = manager.get_universe(top_n=n)
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+                syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"Radar volume filter failed: {e}")
                 syms = []
@@ -306,8 +301,12 @@ def market_radar_server(input, output, session, global_interval):
             # This triggers the effect above to update selected_symbols_radar
             ui.update_text("n_assets_radar", value=str(n)) 
             selected_symbols_radar.set(new_syms)
-            
-            all_syms = manager.get_universe()
+            # Fetch full universe for dropdown choices
+            try:
+                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else list(new_syms)
+            except:
+                all_syms = list(new_syms)
             ui.update_selectize("radar_symbols", choices=all_syms, selected=sorted(list(new_syms)))
         except:
             pass
@@ -319,7 +318,8 @@ def market_radar_server(input, output, session, global_interval):
             val = input.n_assets_rpg()
             n = int(val) if val else 20
             try:
-                syms = manager.get_universe(top_n=n)
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+                syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"RPG volume filter failed: {e}")
                 syms = []
@@ -331,8 +331,11 @@ def market_radar_server(input, output, session, global_interval):
             # This triggers the effect above to update selected_symbols_rpg
             ui.update_text("n_assets_rpg", value=str(n))
             selected_symbols_rpg.set(new_syms)
-            
-            all_syms = manager.get_universe()
+            try:
+                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else list(new_syms)
+            except:
+                all_syms = list(new_syms)
             ui.update_selectize("rpg_symbols", choices=all_syms, selected=sorted(list(new_syms)))
         except:
             pass
@@ -352,7 +355,11 @@ def market_radar_server(input, output, session, global_interval):
     @reactive.effect
     @reactive.event(input.radar_interval, ignore_init=True)
     def _update_symbol_choices():
-        all_syms = manager.get_universe()
+        try:
+            res = requests.get(f"{API_BASE_URL}/data/universe")
+            all_syms = res.json()["symbols"] if res.status_code == 200 else []
+        except:
+            all_syms = []
         curr_sel = sorted(list(selected_symbols_radar.get()))
         ui.update_selectize("radar_symbols", choices=all_syms, selected=curr_sel)
         ui.update_selectize("focus_symbol", choices=[""] + curr_sel)
@@ -374,7 +381,8 @@ def market_radar_server(input, output, session, global_interval):
             # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
             try:
-                new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n_assets})
+                new_syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 ui.notification_show(f"Market Data Error: {str(e)}", type="error")
                 new_syms = []
@@ -385,7 +393,11 @@ def market_radar_server(input, output, session, global_interval):
             selected_symbols_radar.set(set(syms))
             
             # 2. Update UI
-            all_syms = manager.get_universe()
+            try:
+                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else syms
+            except:
+                all_syms = syms
             ui.update_selectize("radar_symbols", choices=all_syms, selected=syms)
             ui.update_selectize("focus_symbol", choices=[""] + syms)
             ui.update_selectize("rpg_focus_symbol", choices=[""] + syms)
@@ -413,7 +425,8 @@ def market_radar_server(input, output, session, global_interval):
             # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
             try:
-                new_syms = manager.fetcher.get_top_volume_symbols(top_n=n_assets)
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n_assets})
+                new_syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 ui.notification_show(f"Path Analysis Error: {str(e)}", type="error")
                 new_syms = []
@@ -421,7 +434,11 @@ def market_radar_server(input, output, session, global_interval):
             selected_symbols_rpg.set(set(syms))
             
             # 2. Update UI
-            all_syms = manager.get_universe()
+            try:
+                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else syms
+            except:
+                all_syms = syms
             ui.update_selectize("rpg_symbols", choices=all_syms, selected=syms)
             ui.update_selectize("rpg_focus_symbol", choices=[""] + syms)
             ui.update_selectize("focus_symbol", choices=[""] + syms)
@@ -456,7 +473,8 @@ def market_radar_server(input, output, session, global_interval):
             
             symbols = list(input.radar_symbols() or [])
             if not symbols:
-                symbols = sorted(list(selected_symbols_radar.get() or manager.get_universe(top_n=20) or MANDATORY_CRYPTO))
+                sym_list = list(selected_symbols_radar.get() or MANDATORY_CRYPTO)
+                symbols = sorted(sym_list)
                 symbols = [s for s in symbols if s not in IGNORED_CRYPTO]
             logger.log("Market Radar", "INFO", f"Calculating metrics for {len(symbols)} symbols")
             
@@ -464,63 +482,30 @@ def market_radar_server(input, output, session, global_interval):
                 ui.notification_show("Please select symbols for analysis.", type="warning")
                 return
 
-            with ui.Progress(min=0, max=len(symbols)) as p:
+            with ui.Progress(min=0, max=100) as p:
                 p.set(message="Analyzing...")
                 
-                # 1. Prepare Benchmark once
-                benchmark_df = manager.load_data(BENCHMARK_SYMBOL, interval)
-                benchmark_returns = None
-                if benchmark_df is not None and not benchmark_df.empty:
-                    b_close = pd.to_numeric(benchmark_df['close'], errors='coerce').ffill().fillna(0)
-                    benchmark_returns = b_close.pct_change().dropna()
+                payload = {
+                    "symbols": symbols,
+                    "interval": interval,
+                    "filter_window": input.filter_window()
+                }
                 
-                # Pulse reactive inputs once here
-                filter_window = input.filter_window()
-
-                def process_symbol(sym):
-                    try:
-                        df = manager.load_data(sym, interval)
-                        df = df.tail(filter_window * 5)
-                        if df is not None and not df.empty:
-                            return engine.compute_all_metrics(
-                                {sym: df}, 
-                                interval=interval, 
-                                benchmark_symbol=BENCHMARK_SYMBOL,
-                                benchmark_returns=benchmark_returns,
-                                window=filter_window
-                            )
-                    except Exception as e:
-                        logger.log("Market Radar", "ERROR", f"Error computing {sym}: {e}")
-                    return None
-
-                results = []
-                # Use a reasonable number of workers
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    # Submit all tasks (Excluding nothing during calculation for realtime filtering)
-                    future_to_sym = {executor.submit(process_symbol, sym): sym for sym in symbols}
-                    
-                    # Process as they complete to update progress bar
-                    for i, future in enumerate(future_to_sym):
-                        sym = future_to_sym[future]
-                        try:
-                            single_res = future.result()
-                            if single_res is not None and not single_res.empty:
-                                results.append(single_res.iloc[0])
-                        except Exception as e:
-                            logger.log("Market Radar", "ERROR", f"Future error for {sym}: {e}")
-                        
-                        p.set(i + 1, detail=f"Processed {sym}")
-                        await reactive.flush()
-                
-                if not results:
-                    ui.notification_show("Failed to compute metrics for any symbols.", type="error")
+                try:
+                    res = requests.post(f"{API_BASE_URL}/market-radar/snapshot", json=payload)
+                    if res.status_code == 200:
+                        results = res.json()["metrics"]
+                        if not results:
+                            ui.notification_show("Failed to compute metrics for any symbols.", type="error")
+                            return
+                        res_df = pd.DataFrame(results)
+                        snapshot_data.set(res_df)
+                        ui.notification_show("Market Snapshot updated!", type="success")
+                    else:
+                        ui.notification_show(f"Calculation error: {res.text}", type="error")
+                except Exception as e:
+                    ui.notification_show(f"API Connection error: {str(e)}", type="error")
                     return
-
-                res = pd.DataFrame(results)
-                logger.log("Market Radar", "INFO", f"Metrics computation complete. Symbols: {len(res)}")
-                
-                snapshot_data.set(res)
-                ui.notification_show("Market Snapshot updated!", type="success")
                 
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"Snapshot error: {str(e)}")
@@ -852,11 +837,16 @@ def market_radar_server(input, output, session, global_interval):
 
     @reactive.Effect
     def _populate_initial_symbols():
-        # Use centralized universe instead of local inventory
-        all_syms = manager.get_universe()
+        try:
+            res = requests.get(f"{API_BASE_URL}/data/universe")
+            all_syms = res.json()["symbols"] if res.status_code == 200 else []
+        except:
+            all_syms = []
+            
         n = int(input.n_assets_radar() or 20)
         try:
-            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
+            res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+            syms = res.json()["symbols"] if res.status_code == 200 else []
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"Initial pop-up sync failed: {e}")
             syms = []
@@ -884,97 +874,36 @@ def market_radar_server(input, output, session, global_interval):
             x_metric = input.rpg_x()
             y_metric = input.rpg_y()
             
-            # 1. Pre-sync data for all selected symbols to ensure local cache is ready
-            with ui.Progress(min=0, max=len(compare_symbols)) as p:
-                p.set(message="Synchronizing data...", detail="Fetching latest candles")
-                for i, sym in enumerate(compare_symbols):
-                    # This ensures data is on disk before we hit the parallel block
-                    manager.load_data(sym, interval, auto_sync=True)
-                    p.set(i + 1)
-                    await reactive.flush()
-
-            # 2. Parallel Calculation
-            with ui.Progress(min=0, max=len(compare_symbols)) as p:
+            # 1. API Call for RPG
+            with ui.Progress(min=0, max=100) as p:
                 p.set(message="Calculating trajectories...")
-                combined_df = pd.DataFrame()
-                window_size = filter_window = input.filter_window()
                 
-                # Pre-map display labels to internal keys
-                key_x = get_metric_key(x_metric)
-                key_y = get_metric_key(y_metric)
-                required_metrics = list(set([key_x, key_y]))
-
-                def process_rpg_symbol(sym):
-                    try:
-                        # Use auto_sync=False because we pre-synced above
-                        df = manager.load_data(sym, interval, auto_sync=False)
-                        if df is not None and not df.empty:
-                            # Standardize and clean in one go
-                            df['close'] = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(0)
-                            
-                            # Calculate exactly what we need
-                            inds = engine.calculate_all_indicators(
-                                df, 
-                                window=window_size, 
-                                interval=interval,
-                                include_metrics=required_metrics
-                            )
-                            
-                            if key_x in inds.columns and key_y in inds.columns:
-                                sx = inds[key_x]
-                                sy = inds[key_y]
-                                
-                                # Sample points from the end with step_size gap
-                                # e.g. if max_points=3, step_size=20 -> indices: -1, -21, -41
-                                valid_sx = sx.dropna()
-                                valid_sy = sy.dropna()
-                                common_idx = valid_sx.index.intersection(valid_sy.index)
-                                
-                                if len(common_idx) >= 1:
-                                    # Pick indices from the end
-                                    indices = []
-                                    for i in range(max_points):
-                                        idx = -(1 + i * step_size)
-                                        if abs(idx) <= len(common_idx):
-                                            indices.append(common_idx[idx])
-                                    
-                                    # Chronological order
-                                    indices = indices[::-1]
-                                    sx, sy = sx.loc[indices], sy.loc[indices]
-                                        
-                                    # Build trajectory rows
-                                    order = np.linspace(0.2, 1.0, len(sx))
-                                    return pd.DataFrame({
-                                        'X_Value': sx.values,
-                                        'Y_Value': sy.values,
-                                        'Symbol': sym,
-                                        'Order': order,
-                                        'Marker_Size': (order + 1) * 8
-                                    })
-                    except Exception as e:
-                        logger.log("Market Radar", "ERROR", f"Error in RPG process for {sym}: {e}")
-                    return None
-
-                results = []
-                # Use a larger worker pool for I/O bound load_data (though it's partially pre-cached now)
-                # and CPU bound metric calcs.
-                with ThreadPoolExecutor(max_workers=15) as executor:
-                    future_to_sym = {executor.submit(process_rpg_symbol, sym): sym for sym in compare_symbols}
-                    for i, future in enumerate(as_completed(future_to_sym)):
-                        sym = future_to_sym[future]
-                        res = future.result()
-                        if res is not None:
-                            results.append(res)
-                        p.set(i + 1, detail=f"Processed {sym}")
-                        await reactive.flush()
+                payload = {
+                    "symbols": compare_symbols,
+                    "interval": interval,
+                    "filter_window": input.filter_window(),
+                    "step_size": step_size,
+                    "max_points": max_points,
+                    "x_metric": get_metric_key(x_metric),
+                    "y_metric": get_metric_key(y_metric)
+                }
                 
-                if results:
-                    combined_df = pd.concat(results)
-                    logger.log("Market Radar", "INFO", f"Trajectory gen complete. Total rows: {len(combined_df)}")
-                    rpg_data.set(combined_df)
-                    ui.notification_show("Trajectory update complete!", type="success")
-                else:
-                    ui.notification_show("No trajectory data generated", type="warning")
+                try:
+                    res = requests.post(f"{API_BASE_URL}/market-radar/path", json=payload)
+                    if res.status_code == 200:
+                        results = res.json()["data"]
+                        if results:
+                            combined_df = pd.DataFrame(results)
+                            logger.log("Market Radar", "INFO", f"Trajectory gen complete. Total rows: {len(combined_df)}")
+                            rpg_data.set(combined_df)
+                            ui.notification_show("Trajectory update complete!", type="success")
+                        else:
+                            ui.notification_show("No trajectory data generated", type="warning")
+                    else:
+                        ui.notification_show(f"Calculation error: {res.text}", type="error")
+                except Exception as e:
+                    ui.notification_show(f"API Connection error: {str(e)}", type="error")
+                    
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"RPG error: {str(e)}")
             ui.notification_show(f"RPG calculation failed: {str(e)}", type="error")

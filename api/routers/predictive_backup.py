@@ -49,7 +49,167 @@ def force_scalar_numeric(df):
             return float(x)
         except:
             return 0.0
-    return df.map(flatten_cell).astype(float)
+    return df.applymap(flatten_cell).astype(float)
+
+def _sanitize_for_json(data):
+    if isinstance(data, pd.DataFrame):
+        df = data.replace([np.inf, -np.inf], None).where(pd.notnull(data), None)
+        return {"columns": list(df.columns), "index": list(df.index.astype(str)), "data": df.values.tolist()}
+    elif isinstance(data, pd.Series):
+        s = data.replace([np.inf, -np.inf], None).where(pd.notnull(data), None)
+        return {"index": list(s.index.astype(str)), "data": s.values.tolist()}
+    elif isinstance(data, np.ndarray):
+        d = np.where(np.isfinite(data), data, None)
+        return d.tolist()
+    elif isinstance(data, dict):
+        return {k: _sanitize_for_json(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [_sanitize_for_json(v) for v in data]
+    return data
+
+class CalibrateRequest(BaseModel):
+    ticker: str
+    interval: str
+
+@router.post("/calibrate")
+def calibrate_thresholds(req: CalibrateRequest):
+    df = manager.load_data(req.ticker, req.interval, auto_sync=False)
+    if df is None or df.empty:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if 'open_time' in df.columns:
+        df = df.set_index(pd.to_datetime(df['open_time']))
+        
+    optimal_vol = calibrate_bar_threshold(df, "Volume Bars")
+    optimal_dollar = calibrate_bar_threshold(df, "Dollar Bars")
+    
+    return {
+        "volume": optimal_vol,
+        "dollar": optimal_dollar
+    }
+
+class EngineeringRequest(BaseModel):
+    ticker: str
+    interval: str
+    vol_th: int
+    dollar_th: int
+
+@router.post("/engineering")
+def run_engineering(req: EngineeringRequest):
+    df = manager.load_data(req.ticker, req.interval, auto_sync=False)
+    if df is None or df.empty:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if 'open_time' in df.columns:
+        df = df.set_index(pd.to_datetime(df['open_time']))
+        
+    time_df = df.copy()
+    time_df['ret'] = np.log(time_df['close'] / time_df['close'].shift(1))
+    
+    vol_df = construct_volume_bars(df, req.vol_th)
+    if not vol_df.empty:
+        vol_df['ret'] = np.log(vol_df['close'] / vol_df['close'].shift(1))
+        
+    dollar_df = construct_dollar_bars(df, req.dollar_th)
+    if not dollar_df.empty:
+        dollar_df['ret'] = np.log(dollar_df['close'] / dollar_df['close'].shift(1))
+        
+    return {
+        "time": _sanitize_for_json(time_df),
+        "volume": _sanitize_for_json(vol_df),
+        "dollar": _sanitize_for_json(dollar_df)
+    }
+
+class FeatureAnalysisRequest(BaseModel):
+    ticker: str
+    interval: str
+    features: List[str]
+    eng_lookback: int
+    eng_min_samples: int
+    vif_th: float
+    pred_lookback: int
+    bar_type: str
+    vol_th: Optional[int] = 10000
+    dollar_th: Optional[int] = 1000000
+
+@router.post("/features")
+def run_feature_analysis(req: FeatureAnalysisRequest):
+    # First get the right bar type data
+    df = manager.load_data(req.ticker, req.interval, auto_sync=False)
+    if df is None or df.empty:
+        raise HTTPException(status_code=400, detail="No data available")
+    
+    if 'open_time' in df.columns:
+        df = df.set_index(pd.to_datetime(df['open_time']))
+
+    if req.bar_type == "Volume Bars":
+        df = construct_volume_bars(df, req.vol_th)
+    elif req.bar_type == "Dollar Bars":
+        df = construct_dollar_bars(df, req.dollar_th)
+
+    if df.empty:
+        raise HTTPException(status_code=400, detail="Bar construction failed")
+
+    # Limit lookback
+    calc_df = df.copy()
+    calc_df = calc_df.iloc[-(req.pred_lookback + req.eng_lookback):]
+    if 'dollar_vol' in calc_df.columns and 'volume' not in calc_df.columns:
+        calc_df['volume'] = calc_df['dollar_vol'] / calc_df['close']
+        
+    if len(calc_df) < req.eng_lookback + 10:
+        raise HTTPException(status_code=400, detail="Insufficient data for lookback")
+
+    feat_df = engine.calculate_all_indicators(calc_df, window=req.eng_lookback, interval=req.interval)
+    valid_feats = [f for f in req.features if f in feat_df.columns]
+    if not valid_feats:
+        raise HTTPException(status_code=400, detail="None of the selected features could be calculated")
+        
+    feat_df = feat_df[valid_feats].dropna()
+    
+    if len(feat_df) < req.eng_min_samples:
+        raise HTTPException(status_code=400, detail=f"Only {len(feat_df)} samples remaining. Need {req.eng_min_samples}.")
+
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    import statsmodels.api as sm
+    from scipy.stats import skew, kurtosis
+
+    stats_list = []
+    vif_dict = {}
+    if len(valid_feats) > 1:
+        try:
+            X_vif = feat_df.loc[:, feat_df.std() > 0]
+            if not X_vif.empty and X_vif.shape[1] > 1:
+                X = sm.add_constant(X_vif)
+                for i, col in enumerate(X_vif.columns):
+                    v = variance_inflation_factor(X.values, i + 1)
+                    vif_dict[col] = min(v, 99.0)
+        except:
+            pass
+
+    for col in valid_feats:
+        s = feat_df[col].describe()
+        vif = vif_dict.get(col, 1.0)
+        stats_list.append({
+            "Feature": col,
+            "Mean": s['mean'],
+            "Std": s['std'],
+            "Skew": skew(feat_df[col]),
+            "Kurtosis": kurtosis(feat_df[col], fisher=True),
+            "VIF": vif,
+            "Keep": "YES" if vif <= req.vif_th else "NO"
+        })
+        
+    stats_df = pd.DataFrame(stats_list)
+    clean_feats = [s['Feature'] for s in stats_list if s['VIF'] <= req.vif_th]
+    feat_df_clean = feat_df[clean_feats] if clean_feats else pd.DataFrame()
+
+    return {
+        "feat_df": _sanitize_for_json(feat_df),
+        "feat_df_clean": _sanitize_for_json(feat_df_clean),
+        "stats_df": stats_df.to_dict(orient="records"),
+        "bar_type": req.bar_type,
+        "vif_threshold": req.vif_th
+    }
 
 @router.post("/analyze")
 def run_predictive_analysis(req: PredictiveRequest):
@@ -78,23 +238,8 @@ def run_predictive_analysis(req: PredictiveRequest):
             raise HTTPException(status_code=400, detail="Not enough bars after construction")
 
         # Feature calculation
-        from src.config import BENCHMARK_SYMBOL
-        bench_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=False)
-        bench_prices = None
-        if bench_df is not None and not bench_df.empty:
-            if 'open_time' in bench_df.columns:
-                bench_df = bench_df.set_index(pd.to_datetime(bench_df['open_time']))
-            bench_prices = bench_df['close']
-
-        all_metrics_df = engine.calculate_all_indicators(df, window=req.eng_lookback, interval=req.interval, benchmark_prices=bench_prices)
-        
-        # Filter out features that are completely NaN (like uncalculatable rel_strength)
-        valid_features = []
-        for feat in req.features:
-            if feat in all_metrics_df.columns and not all_metrics_df[feat].isna().all():
-                valid_features.append(feat)
-                
-        feats_data = {feat: all_metrics_df[feat] for feat in valid_features}
+        all_metrics_df = engine.calculate_all_indicators(df, window=req.eng_lookback, interval=req.interval)
+        feats_data = {feat: all_metrics_df[feat] for feat in req.features if feat in all_metrics_df.columns}
 
         # Labeling
         prices = df['close']
@@ -123,23 +268,22 @@ def run_predictive_analysis(req: PredictiveRequest):
         temp_df = pd.DataFrame(feats_data)
         temp_df['Target_Y'] = y_series
         temp_df['raw_return'] = np.log(prices.ffill() / prices.ffill().shift(1)).shift(-1)
-        nas = temp_df.isna().sum().to_dict()
         temp_df = temp_df.dropna()
-        if temp_df.empty:
-            raise HTTPException(status_code=400, detail=f"NAs={nas}")
-            raise HTTPException(status_code=400, detail=str(temp_df.isna().sum().to_dict()))
 
-        X_data = temp_df[valid_features].copy()
+        if temp_df.empty:
+            raise HTTPException(status_code=400, detail="Empty dataset after cleaning")
+
+        X_data = temp_df[req.features].copy()
         Y_data = temp_df['Target_Y']
         X_data = force_scalar_numeric(X_data)
 
         if req.standardize:
-            for f in valid_features:
+            for f in req.features:
                 if f in X_data.columns:
                     m, s = X_data[f].mean(), X_data[f].std()
                     if s > 1e-9: X_data[f] = (X_data[f] - m) / s
 
-        active_features = FeatureSelector.apply_vif_filter(X_data, threshold=req.vif_th) if len(valid_features) > 1 else valid_features
+        active_features = FeatureSelector.apply_vif_filter(X_data, threshold=req.vif_th) if len(req.features) > 1 else req.features
         
         if not active_features:
             raise HTTPException(status_code=400, detail="No features left after VIF filtering")

@@ -405,7 +405,7 @@ class TripleBarrierLabeler:
         else:
             returns = prices.pct_change().fillna(0.0)
 
-        rolling_vol = returns.ewm(span=self.vol_window).std().fillna(method="bfill").values
+        rolling_vol = returns.ewm(span=self.vol_window).std().bfill().values
         cum_returns = returns.cumsum().values
         labels = np.zeros(n)
 

@@ -11,6 +11,8 @@ APP_LAYOUT = "wide"
 THEME = "quartz"
 BG_COLOR = "#1a1a1a"
 
+API_BASE_URL = "http://127.0.0.1:3000/api"
+
 # --- TIMEZONE SETTING ---
 # Global offset from UTC in hours (e.g., 7 for UTC+7, -5 for EST)
 TIMEZONE_OFFSET = 7
@@ -31,7 +33,7 @@ This application allows you to analyze Binance Perpetual Futures with advanced s
 
 # --- DATA SETTINGS ---
 # Symbols that are always fetched
-MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'METISUSDT', 'BTCDOMUSDT', 'CLUSDT', 'BZUSDT', 'XAUUSDT', 'XAGUSDT', 'PAXGUSDT' ]
+MANDATORY_CRYPTO = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'CLUSDT', 'XAUUSDT', 'XAGUSDT', 'QQQUSDT', 'SPYUSDT']
 IGNORED_CRYPTO = []
 
 # Benchmark used for Relative Strength and Beta
@@ -76,6 +78,7 @@ METRIC_LABELS = {
     'vama': 'VAMA',
     'liquidity_impact': 'Liquidity Impact',
     'vol_rank': 'Volatility Rank',
+    'mr_prob': 'Mean Reversion Probability',
     'max_drawdown': 'Max Drawdown',
     'avg_drawdown': 'Average Drawdown',
     'breakout_score_dist': 'Breakout Score v1',
@@ -99,7 +102,7 @@ ALL_METRICS = [
     'volatility','vol_imbalance', 'fip', 
     'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
     'rsi_norm', 'atr_norm', 'cmf', 'vwap_z', 'skewness',
-    'autocorr_1', 'autocorr_5', 'imbalance_bar', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank',
+    'autocorr_1', 'autocorr_5', 'imbalance_bar', 'volume_imbalance', 'vol_atr', 'vama', 'liquidity_impact', 'vol_rank', 'mr_prob',
     'max_drawdown', 'avg_drawdown',
     'breakout_score_dist', 'breakout_score_break',
     # 'sign_lag1', 'sign_lag2', 'sign_lag3', 'rolling_sign_lag5', 'rolling_sign_lag10', 'rolling_sign_lag20',
@@ -113,7 +116,7 @@ DEFAULT_FEATURES = [
     'atr_norm', 'vol_atr', 'vama', 'cmf', 'vam', 'skewness',
     'sign_lag1', 'sign_lag2', 'sign_lag3',
     'autocorr_1', 'autocorr_5', 
-    'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank',
+    'imbalance_bar', 'vol_imbalance', 'volume_imbalance', 'liquidity_impact', 'vol_rank', 'mr_prob',
     'max_drawdown', 'avg_drawdown',
     'breakout_score_dist', 'breakout_score_break',
     'funding_rate',

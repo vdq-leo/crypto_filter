@@ -34,6 +34,24 @@ class DecompRequest(BaseModel):
     matrix_structure: str = "Correlation"
     matrix_method: Optional[str] = "pearson"
     mean_reversion: bool = True
+    k_factor_mode: str = "top"
+    spillover_type: str = "volatility"
+
+def _sanitize_for_json(data):
+    if isinstance(data, pd.DataFrame):
+        df = data.replace([np.inf, -np.inf], None).where(pd.notnull(data), None)
+        return {"columns": list(df.columns), "index": list(df.index), "data": df.values.tolist()}
+    elif isinstance(data, pd.Series):
+        s = data.replace([np.inf, -np.inf], None).where(pd.notnull(data), None)
+        return {"index": list(s.index), "data": s.values.tolist()}
+    elif isinstance(data, np.ndarray):
+        d = np.where(np.isfinite(data), data, None)
+        return d.tolist()
+    elif isinstance(data, dict):
+        return {k: _sanitize_for_json(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [_sanitize_for_json(v) for v in data]
+    return data
 
 def _load_data_concurrently(symbols, interval, load_price=False):
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -175,22 +193,41 @@ def run_decomposition(req: DecompRequest):
         T = len(wide_df)
         N = len(wide_df.columns)
         
+        res_data = {}
+        
         if req.method == "eigen":
-            res = DecompositionEngine.eigen_decomposition(corr_clean, n_components=req.n_components)
-            return {"method": "eigen", "components": res['components'].to_dict(), "variance": res['variance_explained'].to_dict()}
+            res_data = DecompositionEngine.pca_decompose(wide_df, n_components=req.n_components)
+            res_data['mode'] = "Standard"
         elif req.method == "rmt":
-            res = DecompositionEngine.rmt_filter(corr_clean, T, N)
-            filtered = res['filtered_matrix'].replace([np.inf, -np.inf], None).where(pd.notnull(res['filtered_matrix']), None)
-            return {"method": "rmt", "filtered_matrix": filtered.to_dict()}
+            res_data = DecompositionEngine.spectral_filter_rmt(corr_clean, T, N)
+        elif req.method == "kfactor":
+            res_data = DecompositionEngine.k_factor_decompose(wide_df, 0, mode=req.k_factor_mode)
+        elif req.method == "ica":
+            n_comp = min(req.n_components, N, T)
+            res_data = DecompositionEngine.ica_decompose(wide_df, n_components=n_comp)
+        elif req.method == "distance":
+            res_data = DecompositionEngine.distance_matrix(corr_clean)
         elif req.method == "cluster":
-            dist = DecompositionEngine.distance_matrix(corr_clean.fillna(0))
-            res = DecompositionEngine.hierarchical_cluster(dist, method=req.linkage_method)
-            return {"method": "cluster", "linkage": res['linkage_matrix'].tolist(), "labels": list(dist.index)}
+            dist = DecompositionEngine.distance_matrix(corr_clean)
+            res_data = DecompositionEngine.hierarchical_cluster(dist, method=req.linkage_method)
+            res_data['dist'] = dist
         elif req.method == "mst":
-            res = DecompositionEngine.mst_network(corr_clean)
-            return {"method": "mst", "edges": res['edges'].to_dict(orient="records")}
+            if req.spillover_type == "volatility":
+                vol = wide_df.ewm(span=req.window, adjust=False).std().dropna()
+                res_data = DecompositionEngine.vol_spillover(vol)
+            else:
+                res_data = DecompositionEngine.return_spillover(wide_df)
         else:
             raise HTTPException(status_code=400, detail="Invalid method")
+
+        sanitized_data = _sanitize_for_json(res_data)
+        
+        return {
+            "method": req.method,
+            "data": sanitized_data,
+            "corr": _sanitize_for_json(corr_clean),
+            "spillover_type": req.spillover_type if req.method == "mst" else None
+        }
 
     except Exception as e:
         import traceback

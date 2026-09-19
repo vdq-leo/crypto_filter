@@ -19,4 +19,4 @@ fastapi
 uvicorn
 shap
 backtrader
-numba
+numbajinja2

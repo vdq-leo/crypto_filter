@@ -1,6 +1,8 @@
 from shiny import ui, render, reactive
 import faicons as fa
-from src.logger import logger
+import requests
+import pandas as pd
+from src.config import API_BASE_URL
 
 def activity_logs_ui():
     return ui.layout_sidebar(
@@ -32,27 +34,24 @@ def activity_logs_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_clear_logs)
     def _():
-        logger.clear()
-        logger.log("ActivityLogs", "INFO", "Logs cleared by user")
+        try:
+            requests.delete(f"{API_BASE_URL}/logs")
+        except:
+            pass
     
     @render.data_frame
     def logs_table():
         limit = input.log_limit()
         level_filter = input.log_level_filter()
         
-        df = logger.get_logs(limit=limit)
-        
-        if df.empty:
-            return df
-        
-        # Apply level filter
-        if level_filter != "ALL":
-            df = df[df['level'] == level_filter]
-        
-        # Sort by timestamp descending (most recent first)
-        df = df.sort_values('timestamp', ascending=False)
-        
-        # Format timestamp for display
-        df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        return df
+        try:
+            res = requests.get(f"{API_BASE_URL}/logs", params={"limit": limit, "level": level_filter})
+            if res.status_code == 200:
+                data = res.json()
+                if not data:
+                    return pd.DataFrame()
+                df = pd.DataFrame(data)
+                return df
+        except:
+            pass
+        return pd.DataFrame()

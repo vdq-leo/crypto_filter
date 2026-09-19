@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api.routers import data, market_radar, diagnostics, predictive, multivariate, pair_radar
+from api.routers import data, market_radar, diagnostics, predictive, multivariate, pair_radar, logs
 
 app = FastAPI(
     title="Crypto Filter API",
@@ -28,6 +28,7 @@ app.include_router(diagnostics.router, prefix="/api/diagnostics", tags=["Diagnos
 app.include_router(predictive.router, prefix="/api/predictive", tags=["Predictive Analytics"])
 app.include_router(multivariate.router, prefix="/api/multivariate", tags=["Multivariate"])
 app.include_router(pair_radar.router, prefix="/api/pair-radar", tags=["Pair Radar"])
+app.include_router(logs.router, prefix="/api/logs", tags=["Logs"])
 
 if __name__ == "__main__":
     import uvicorn

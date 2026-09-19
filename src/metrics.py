@@ -314,6 +314,89 @@ class MetricsEngine:
         if should_calc('vol_rank'):
             vol = ret.rolling(window).std()
             res['vol_rank'] = vol.rolling(window).rank(pct=True)
+            
+        if should_calc('mr_prob'):
+            # --- PineScript Parameters ---
+            lookback = 100
+            priceZLookback = 50
+            adfEmaLen = 10
+            adfSlowLen = 50
+            crit = -1.5
+            adfNormLen = 100
+            divNormLen = 100
+            slopeNormLen = 50
+            volNormLen = 200
+            priceZLow = -1.5
+            priceZHigh = 1.5
+            adfWeight = 0.4
+            divWeight = 0.3
+            slopeWeight = 0.15
+            volWeight = 0.15
+            adfSensitivity = 2.0
+            divSensitivity = 1.0
+            slopeSensitivity = 0.5
+            volSensitivity = 1.5
+            volShortLen = 30
+            volLongLen = 200
+            baseProb = 0.50
+            modelScale = 1.0
+            zClamp = 4.0
+            # ---------------------------
+            
+            n = lookback - 1
+            dy = close.diff()
+            x = close.shift(1)
+            sum_x = x.rolling(n).sum()
+            sum_y = dy.rolling(n).sum()
+            sum_xx = (x * x).rolling(n).sum()
+            sum_xy = (x * dy).rolling(n).sum()
+            denom = n * sum_xx - sum_x * sum_x
+            beta = (n * sum_xy - sum_x * sum_y) / denom
+            alpha = (sum_y - beta * sum_x) / n
+            sum_yy = (dy * dy).rolling(n).sum()
+            rss = sum_yy - alpha * sum_y - beta * sum_xy
+            sigma2 = rss / max(n - 2, 1)
+            se = np.sqrt(sigma2 * n / denom)
+            adf = beta / se
+            
+            fast = adf.ewm(span=adfEmaLen, adjust=False).mean()
+            slow = fast.rolling(adfSlowLen).mean()
+            divergence = fast - slow
+            divMean = divergence.rolling(divNormLen).mean()
+            divStd = divergence.rolling(divNormLen).std(ddof=0)
+            divZ = np.where(divStd > 1e-10, (divergence - divMean) / divStd, 0.0)
+            
+            divSlope = divergence.diff()
+            slopeMean = divSlope.rolling(slopeNormLen).mean()
+            slopeStd = divSlope.rolling(slopeNormLen).std(ddof=0)
+            slopeZ = np.where(slopeStd > 1e-10, (divSlope - slopeMean) / slopeStd, 0.0)
+            
+            adfStd = adf.rolling(adfNormLen).std(ddof=0)
+            adfZ = np.where(adfStd > 1e-10, (crit - adf) / adfStd, 0.0)
+            
+            atrShort = close.diff().abs().rolling(volShortLen).mean()
+            atrLong = close.diff().abs().rolling(volLongLen).mean()
+            volRatio = np.where(atrLong > 0, atrShort / atrLong, 1.0)
+            logVolRatio = pd.Series(np.where(volRatio > 0, np.log(volRatio), 0.0), index=close.index)
+            volStd = logVolRatio.rolling(volNormLen).std(ddof=0)
+            volZ = np.where(volStd > 1e-10, logVolRatio / volStd, 0.0)
+            
+            adfScore = np.clip(adfZ, -zClamp, zClamp)
+            divScore = np.clip(-divZ, -zClamp, zClamp)
+            slopeScore = np.clip(-slopeZ, -zClamp, zClamp)
+            volScore = np.clip(volZ, -zClamp, zClamp)
+            
+            adfLogit = adfSensitivity * adfScore
+            divLogit = divSensitivity * divScore
+            slopeLogit = slopeSensitivity * slopeScore
+            volLogit = volSensitivity * volScore
+            
+            weightSum = adfWeight + divWeight + slopeWeight + volWeight
+            weightedLogit = np.where(weightSum > 0, (adfWeight * adfLogit + divWeight * divLogit + slopeWeight * slopeLogit + volWeight * volLogit) / weightSum, 0.0)
+            
+            modelLogit = np.log(baseProb / (1.0 - baseProb)) + modelScale * weightedLogit
+            mrProbability = np.where(modelLogit >= 0, 1.0 / (1.0 + np.exp(-modelLogit)), np.exp(modelLogit) / (1.0 + np.exp(modelLogit)))
+            res['mr_prob'] = pd.Series(mrProbability * 100.0, index=close.index)
         
         # 228. FIP (Frog-in-the-Pan)
         if should_calc('fip'):
@@ -830,9 +913,9 @@ class MetricsEngine:
              
         # Clean prices: ffill is safest for time series continuity
         df = df.copy()
-        df['close'] = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(method='bfill')
-        df['high'] = pd.to_numeric(df['high'], errors='coerce').ffill().fillna(method='bfill')
-        df['low'] = pd.to_numeric(df['low'], errors='coerce').ffill().fillna(method='bfill')
+        df['close'] = pd.to_numeric(df['close'], errors='coerce').ffill().bfill()
+        df['high'] = pd.to_numeric(df['high'], errors='coerce').ffill().bfill()
+        df['low'] = pd.to_numeric(df['low'], errors='coerce').ffill().bfill()
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
         
         # Calculate all standard indicators

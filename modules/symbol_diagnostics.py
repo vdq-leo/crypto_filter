@@ -12,37 +12,9 @@ from scipy.optimize import minimize
 from scipy.stats import skew, kurtosis
 from sklearn.linear_model import LinearRegression
 
-from src.data import DataManager
-from src.metrics import MetricsEngine
-from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
 from src.logger import logger
-from src.shared_state import get_manager, get_engine
 import requests
-from ml_engine.labeling.labeler import Labeler
-from ml_engine.analysis.multivariate import DecompositionEngine
-from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
-
-# --- GARCH HELPER ---
-
-from arch import arch_model
-
-def forecast_garch(returns, steps=10, ann_factor=1):
-    r = np.asarray(returns)
-    model = arch_model(
-        r,
-        mean="Zero",
-        vol="GARCH",
-        p=1,
-        q=1,
-        rescale=True
-    )
-
-    res = model.fit(disp="off")
-    hist_vol = res.conditional_volatility * np.sqrt(ann_factor)
-    fc = res.forecast(horizon=steps)
-    fc_var = fc.variance.values[-1]
-    fc_vol = np.sqrt(fc_var) * np.sqrt(ann_factor)
-    return fc_vol, hist_vol
 
 # --- STYLING CONSTANTS ---
 THEME_BG = "#0b3d91"
@@ -205,8 +177,6 @@ def symbol_diagnostics_ui():
     )
     
 def symbol_diagnostics_server(input, output, session, global_interval):
-    manager = get_manager()
-    engine = get_engine()
     
     diag_data = reactive.Value({})
     engineering_results_cache = reactive.Value(None)
@@ -215,16 +185,25 @@ def symbol_diagnostics_server(input, output, session, global_interval):
                                 "symbol": {"oldest": "-", "latest": "-"}})
     
     def get_timestamps(symbol, interval):
-        # Disable auto_sync for metadata checks to prevent startup data fetching
-        df = manager.load_data(symbol, interval, auto_sync=False)
-        if df is not None and not df.empty and 'open_time' in df.columns:
-            ts = pd.to_datetime(df['open_time'])
-            return {"oldest": str(ts.min()), "latest": str(ts.max())}
+        try:
+            res = requests.get(f"{API_BASE_URL}/data/klines", params={"symbol": symbol, "interval": interval, "limit": 10000})
+            if res.status_code == 200:
+                data = res.json().get("candles", [])
+                if data:
+                    oldest = pd.to_datetime(data[0]["time"], unit='s')
+                    latest = pd.to_datetime(data[-1]["time"], unit='s')
+                    return {"oldest": str(oldest), "latest": str(latest)}
+        except:
+            pass
         return {"oldest": "-", "latest": "-"}
     
     @reactive.Effect
     def populate_symbols():
-        all_syms = manager.get_universe()
+        try:
+            res = requests.get(f"{API_BASE_URL}/data/universe")
+            all_syms = res.json()["symbols"] if res.status_code == 200 else []
+        except:
+            all_syms = []
         ui.update_selectize("diag_symbol", choices=all_syms, selected="BTCUSDT", server=True)
         
         # Set benchmark/global timestamps once
@@ -269,289 +248,61 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         with ui.Progress(min=0, max=100) as p:
             p.set(10, message="Loading Data...")
             
-            # 1. Load Data
-            df = manager.load_data(symbol, interval)
-            bench_df = manager.load_data(BENCHMARK_SYMBOL, interval)
-            
-            if df is None or df.empty or len(df) < window:
-                ui.notification_show("Insufficient data for analysis", type="error")
-                return
-            
-             # Update Symbol Date Info
-            if 'open_time' in df.columns:
-                last_ts_sym = pd.to_datetime(df['open_time']).max()
-                curr_info = data_info.get()
-                curr_info['symbol'] = str(last_ts_sym)
-                data_info.set(curr_info)
-
-            # Clean & Prepare
-            prices = pd.to_numeric(df['close'], errors='coerce').ffill().values
-            log_rets = np.diff(np.log(prices))
-            log_rets = np.nan_to_num(log_rets)
-            
-            # Load Benchmark
-            bench_rets = None
-            if bench_df is not None and not bench_df.empty:
-                b_prices = pd.to_numeric(bench_df['close'], errors='coerce').ffill().values
-                bench_rets = np.diff(np.log(b_prices))
-                # Align lengths
-                min_len = min(len(log_rets), len(bench_rets))
-                log_rets_aligned = log_rets[-min_len:]
-                bench_rets_aligned = bench_rets[-min_len:]
-            
-            p.set(30, message="Calculating Performance...")
-            
-            # 2. Performance Metrics
-            res_sharpe = engine.calculate_sharpe_ratio(log_rets, interval=interval)
-            res_sortino = engine.calculate_sortino_ratio(log_rets, interval=interval)
-            res_maxdd = engine.calculate_max_drawdown(prices)
-            res_avgdd = engine.calculate_avg_drawdown(prices)
-            
-            # CVaR (Conditional Value at Risk) at 95% confidence level
-            var_threshold = np.percentile(log_rets, 5)  # 5th percentile (95% confidence)
-            cvar = log_rets[log_rets <= var_threshold].mean()
-            
-            # Volatility (annualized)
-            ann_factor = engine.get_annual_scaling(interval)
-            volatility = np.std(log_rets) * np.sqrt(ann_factor)
-            
-            # Omega Ratio (ratio of gains to losses relative to threshold, using 0 as threshold)
-            threshold = 0
-            gains = log_rets[log_rets > threshold].sum()
-            losses = np.abs(log_rets[log_rets <= threshold].sum())
-            omega_ratio = gains / losses if losses != 0 else 0
-            
-            # 3. Metrics Snapshot
-            latest_metrics = engine.calculate_all_indicators(
-                df.iloc[-window * 2:], 
-                benchmark_returns=np.log(bench_df['close']).diff()[-window * 2:],
-                interval=interval,
-                window=int(metric_window) 
-            )
-            
-            p.set(50, message="Calculating Exposure...")
-            
-            # 4. Exposure (Beta)
-            beta, alpha, r2 = 0, 0, 0
-            if bench_rets is not None:
-                beta_, alpha_, r2 = engine.calculate_beta_alpha(log_rets_aligned, bench_rets_aligned)
-                
-            # Factor Decomp - Load ALL symbols for comprehensive analysis
-            market_data = {}
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            
-            def _load_sym(s_name):
-                d = manager.load_data(s_name, interval)
-                if d is not None and not d.empty:
-                    return s_name, pd.to_numeric(d['close'], errors='coerce').pct_change()
-                return s_name, None
-                
-            syms_to_load = [s for s in MANDATORY_CRYPTO if s not in IGNORED_CRYPTO]
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futs = [executor.submit(_load_sym, s) for s in syms_to_load]
-                for fut in as_completed(futs):
-                    s_name, ret_series = fut.result()
-                    if ret_series is not None:
-                        market_data[s_name] = ret_series
-            
-            factor_df = pd.DataFrame(market_data).ffill().fillna(0).tail(window)
-            mn_cum_ret = pd.Series(dtype=float)
-            
-            if factor_df.shape[1] > 2:
-                decomp_res = DecompositionEngine.k_factor_decompose(factor_df, k=5)
-                sym_series = pd.Series(log_rets[-window:], index=factor_df.index)
-                
-                # Market Neutral Calculation: Regress sym_series against PC1
-                pc1 = decomp_res['factor_returns']['PC1'].values.reshape(-1, 1)
-                y = sym_series.values
-                
-                lr = LinearRegression()
-                lr.fit(pc1, y)
-                residuals = y - lr.predict(pc1)
-                mn_cum_ret = pd.Series(np.cumsum(residuals), index=factor_df.index)
-            
-            p.set(70, message="Forecasting...")
-            
-            # --- Timestamp generation for Forecast ---
+            # 1. Fetch Diagnostics Data
             try:
-                ts_series = pd.to_datetime(df['open_time'])
-                history_ts_full = ts_series.dt.strftime('%Y-%m-%d %H:%M').values
-                
-                # We need history timestamps for the charts
-                # Price chart uses prices[-window-10:]
-                price_hist_ts = history_ts_full[-window-10:]
-                # Vol chart uses window
-                vol_hist_ts = history_ts_full[-window:]
-                
-                # Generate future timestamps
-                last_ts = ts_series.iloc[-1]
-                unit = interval[-1]
-                val = int(interval[:-1])
-                unit_map = {'m': 'min', 'h': 'h', 'd': 'd', 'w': 'W'}
-                freq = f"{val}{unit_map.get(unit, 'h')}"
-                
-                forecast_ts = pd.date_range(
-                    start=last_ts + pd.Timedelta(freq), 
-                    periods=10, 
-                    freq=freq
-                ).strftime('%Y-%m-%d %H:%M').values
+                payload = {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "metric_window": int(metric_window),
+                    "diag_window": int(window)
+                }
+                res = requests.post(f"{API_BASE_URL}/diagnostics/run", json=payload)
+                if res.status_code == 200:
+                    api_data = res.json()
+                    
+                    # Transform back to data_pack format
+                    perf = api_data.get("performance", {})
+                    charts = api_data.get("charts", {})
+                    
+                    data_pack = {
+                        "sharpe": perf.get("sharpe", 0),
+                        "sortino": perf.get("sortino", 0),
+                        "maxdd": perf.get("maxdd", 0),
+                        "avgdd": perf.get("avgdd", 0),
+                        "cvar": perf.get("cvar", 0),
+                        "volatility": perf.get("volatility", 0),
+                        "omega": perf.get("omega", 0),
+                        "beta": perf.get("beta", 0),
+                        "alpha": perf.get("alpha", 0),
+                        "impact_spread": perf.get("impact_spread", 0),
+                        "imbalance": perf.get("imbalance", 0),
+                        "adl_risk": perf.get("adl_risk", 0),
+                        "metrics_df": pd.DataFrame(charts.get("metrics", [])),
+                        "mn_cum_ret": pd.Series(charts.get("mn_cum_ret", [])),
+                        "fc_price": {
+                            "hist": charts.get("prices", {}).get("hist", []),
+                            "fc": charts.get("prices", {}).get("forecast", []),
+                            "ci": np.column_stack((charts.get("prices", {}).get("ci_lower", []), charts.get("prices", {}).get("ci_upper", []))),
+                        },
+                        "fc_vol": {
+                            "hist": charts.get("volatility", {}).get("hist", []),
+                            "fc": charts.get("volatility", {}).get("forecast", [])
+                        },
+                        "regime": charts.get("regime", {}),
+                        "ts_oi": charts.get("ts_oi", []),
+                        "ts_top_pos": charts.get("ts_top_pos", []),
+                        "ts_top_acc": charts.get("ts_top_acc", []),
+                        "ts_glob_acc": charts.get("ts_glob_acc", []),
+                        "ts_taker": charts.get("ts_taker", []),
+                        "ts_fund": charts.get("ts_fund", [])
+                    }
+                    diag_data.set(data_pack)
+                    p.set(100, message="Complete")
+                else:
+                    ui.notification_show(f"Calculation error: {res.text}", type="error")
             except Exception as e:
-                logger.log("Symbol Diagnostics", "ERROR", f"Timestamp generation failed: {e}")
-                price_hist_ts = np.arange(window + 10)
-                vol_hist_ts = np.arange(window)
-                forecast_ts = np.arange(window + 10, window + 20)
-
-            # 5. Forecast
-            try:
-                # ARIMA for Price - Using log-prices to effectively model log-returns
-                # (2,1,2) on log-price is equivalent to (2,0,2) on log-returns
-                history_price = prices[-window - 10:]
-                log_history = np.log(history_price)
-                
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    model = ARIMA(log_history, order=(1,1,1))
-                    model_fit = model.fit()
-                    fc_res = model_fit.get_forecast(steps=10)
-                
-                # Transform back from log-space to price-space
-                fc_mean = np.exp(fc_res.predicted_mean)
-                fc_ci = np.exp(fc_res.conf_int(alpha=0.05))
-            except Exception as e:
-                print(f"ARIMA failed for {symbol}: {str(e)}")
-                # Fallback to last price
-                last_p = history_price[-1] if len(history_price) > 0 else 0
-                fc_mean = np.full(10, last_p)
-                # Simple CI 1% fallback
-                fc_ci = np.zeros((10, 2))
-                fc_ci[:, 0] = last_p * 0.99
-                fc_ci[:, 1] = last_p * 1.01
-
-            # GARCH Volatility Forecast
-            try:
-                garch_data = log_rets[-window:]
-
-                if len(garch_data) < 20:
-                    raise ValueError(f"Insufficient data for GARCH: {len(garch_data)} points")
-
-                vol_forecast_vals, hist_vol = forecast_garch(
-                    garch_data,
-                    steps=10,
-                    ann_factor=MetricsEngine.get_annual_scaling(interval)
-                )
-
-            except Exception as e:
-                logger.log("Symbol Diagnostics", "ERROR", f"GARCH failed for {symbol}: {str(e)}")
-                vol_forecast_vals = np.zeros(10)
-                hist_vol = np.zeros(len(garch_data))
-
-            p.set(80, message="Regime Classification...")
-            
-            # 6. Regime (Labeler - Trend)
-            # Use smaller window for labeling loop or just label whole series
-            l_algo = Labeler(amplitude_threshold=0.01, max_inactive_period=10) # 1% move, 10 bars inactive
-            lbl_df = l_algo.label(prices[-window:])
-            curr_lbl_val = lbl_df['label'].iloc[-1]
-            if curr_lbl_val == 1: curr_regime = "Uptrend"
-            elif curr_lbl_val == -1: curr_regime = "Downtrend"
-            else: curr_regime = "Sideways/Neutral"
-            
-            p.set(90, message="Relationships...")
-            
-            # Relationships (Deprecated)
-            corrs = pd.Series(dtype=float)
-            coint_scores = []
-            zscore_spreads = []
-
-            col_droped = ["volatility"]
-            latest_metrics = latest_metrics.drop(columns=col_droped)
-            latest_metrics = latest_metrics.dropna(axis=1, how="all")
-            latest_metrics = latest_metrics.dropna(axis=0, how="all")
-            
-            def z_score(x):
-                return (x - x.mean()) / x.std()
-
-            for col in latest_metrics.columns:
-                latest_metrics[col] = z_score(latest_metrics[col])
-
-            # 7. Orderbook Status
-            p.set(95, message="Fetching Orderbook...")
-            try:
-                book_status = manager.fetcher.get_books_status(symbol)
-            except Exception as e:
-                logger.log("Symbol Diagnostics", "ERROR", f"Orderbook fetch failed: {e}")
-                book_status = {}
-
-            # 8. Trading Statistics (Binance)
-            p.set(98, message="Fetching Trading Stats...")
-            period_mapping = {
-                '1m': '5m', '3m': '5m', '5m': '5m', '15m': '15m',
-                '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h',
-                '6h': '6h', '8h': '6h', '12h': '12h', '1d': '1d',
-                '3d': '1d', '1w': '1d', '1M': '1d'
-            }
-            period = period_mapping.get(interval, '1h')
-            limit = min(window, 500)
-            
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=6) as executor:
-                f_oi = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.OPEN_INTEREST_HIST, limit=limit)
-                f_pos = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.TOP_LS_POSITION, limit=limit)
-                f_acc = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.TOP_LS_ACCOUNT, limit=limit)
-                f_g_acc = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.GLOBAL_LS_ACCOUNT, limit=limit)
-                f_taker = executor.submit(manager.fetcher.get_historical_stats_series, symbol, period, manager.fetcher.TAKER_BUY_SELL, limit=limit)
-                f_fund = executor.submit(manager.fetcher.get_historical_funding_rate, symbol, limit=limit)
-                
-                oi_hist = f_oi.result()
-                top_pos = f_pos.result()
-                top_acc = f_acc.result()
-                glob_acc = f_g_acc.result()
-                taker_ratio = f_taker.result()
-                fund_hist = f_fund.result()
-            
-            adl_risk_map = manager.fetcher.get_all_adl_risks()
-            current_adl_risk = adl_risk_map.get(symbol, 0)
-
-            # Pack Data
-            data_pack = {
-                "sharpe": res_sharpe,
-                "sortino": res_sortino,
-                "maxdd": res_maxdd,
-                "avgdd": res_avgdd,
-                "cvar": cvar,
-                "volatility": volatility,
-                "omega": omega_ratio,
-                "metrics_df": latest_metrics.tail(1).T.reset_index(),
-                "beta": beta_,
-                "alpha": alpha_,
-                "mn_cum_ret": mn_cum_ret if not mn_cum_ret.empty else pd.Series(dtype=float),
-                "fc_price": {
-                    "hist": history_price, 
-                    "fc": fc_mean, 
-                    "ci": fc_ci,
-                    "hist_ts": price_hist_ts,
-                    "fc_ts": forecast_ts
-                },
-                "fc_vol": {
-                    "hist": hist_vol, 
-                    "fc": vol_forecast_vals,
-                    "hist_ts": vol_hist_ts,
-                    "fc_ts": forecast_ts
-                },
-                "regime": {"status": curr_regime, "labels": lbl_df['label'].values, "prices": lbl_df['price'].values},
-                "impact_spread": book_status.get("impact_spread"),
-                "imbalance": book_status.get("orderbook_imbalance"),
-                "adl_risk": current_adl_risk,
-                "ts_oi": oi_hist,
-                "ts_top_pos": top_pos,
-                "ts_top_acc": top_acc,
-                "ts_glob_acc": glob_acc,
-                "ts_taker": taker_ratio,
-                "ts_fund": fund_hist
-            }
-            
-            diag_data.set(data_pack)
-            p.set(100, message="Complete")
+                logger.log("Symbol Diagnostics", "ERROR", f"Diagnostics Run failed: {e}")
+                ui.notification_show(f"API Connection error: {str(e)}", type="error")
 
     # ----- RENDERERS -----
     
@@ -826,37 +577,52 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             return None
 
         with ui.Progress(min=0, max=100) as p:
-            p.set(10, message="Loading Data...")
-            df = manager.load_data(symbol, interval)
-            if df is None or df.empty: return None
+            p.set(50, message="Generating Bars from API...")
             
-            if 'open_time' in df.columns:
-                df = df.set_index(pd.to_datetime(df['open_time']))
-            
-            p.set(30, message="Generating Time Bars...")
-            time_df = df.copy()
-            time_df['ret'] = np.log(time_df['close'] / time_df['close'].shift(1))
-            
-            p.set(50, message="Generating Volume Bars...")
-            vol_df = construct_volume_bars(df, input.diag_vol_th())
-            if not vol_df.empty:
-                vol_df['ret'] = np.log(vol_df['close'] / vol_df['close'].shift(1))
-                
-            p.set(70, message="Generating Dollar Bars...")
-            dollar_df = construct_dollar_bars(df, input.diag_dollar_th())
-            if not dollar_df.empty:
-                dollar_df['ret'] = np.log(dollar_df['close'] / dollar_df['close'].shift(1))
-            
-            p.set(100, message="Complete")
-            
-            res = {
-                "time": time_df,
-                "volume": vol_df,
-                "dollar": dollar_df,
-                "ticker": symbol
+            payload = {
+                "symbol": symbol,
+                "interval": interval,
+                "vol_th": input.diag_vol_th(),
+                "dollar_th": input.diag_dollar_th()
             }
-            engineering_results_cache.set(res)
-            return res
+            try:
+                res_api = requests.post(f"{API_BASE_URL}/diagnostics/bars", json=payload)
+                if res_api.status_code == 200:
+                    data = res_api.json()
+                    
+                    def to_df(bar_data):
+                        if not bar_data or "data" not in bar_data: return pd.DataFrame()
+                        df = pd.DataFrame(bar_data["data"])
+                        if not df.empty and 'index' in df.columns:
+                            df = df.set_index('index')
+                        return df
+                    
+                    time_df = to_df(data.get("time"))
+                    vol_df = to_df(data.get("volume"))
+                    dollar_df = to_df(data.get("dollar"))
+                    
+                    p.set(100, message="Complete")
+                    
+                    res = {
+                        "time": time_df,
+                        "volume": vol_df,
+                        "dollar": dollar_df,
+                        "ticker": symbol,
+                        "stats": {
+                            "time": data.get("time", {}).get("stats", {}),
+                            "volume": data.get("volume", {}).get("stats", {}),
+                            "dollar": data.get("dollar", {}).get("stats", {})
+                        }
+                    }
+                    engineering_results_cache.set(res)
+                    return res
+                else:
+                    ui.notification_show(f"Calculation error: {res_api.text}", type="error")
+                    return None
+            except Exception as e:
+                logger.log("Symbol Diagnostics", "ERROR", f"Bars generation failed: {e}")
+                ui.notification_show(f"API Connection error: {str(e)}", type="error")
+                return None
 
     @render_widget
     def diag_engineering_dist_plot():
@@ -904,15 +670,15 @@ def symbol_diagnostics_server(input, output, session, global_interval):
         if res is None: return None
         
         stats_list = []
+        stats_dict = res.get("stats", {})
         for k in ["time", "volume", "dollar"]:
-            df = res.get(k)
-            if df is not None and not df.empty:
-                rets = df['ret'].dropna()
+            s = stats_dict.get(k, {})
+            if s and s.get("count", 0) > 0:
                 stats_list.append({
                     "Bar Type": k.capitalize(),
-                    "Count": len(df),
-                    "Skew": skew(rets),
-                    "Kurtosis": kurtosis(rets, fisher=True)
+                    "Count": s.get("count", 0),
+                    "Skew": s.get("skew", 0),
+                    "Kurtosis": s.get("kurtosis", 0)
                 })
         
         df_stats = pd.DataFrame(stats_list)
@@ -938,27 +704,31 @@ def symbol_diagnostics_server(input, output, session, global_interval):
             return
 
         with ui.Progress(min=0, max=100) as p:
-            p.set(20, message="Loading Data...")
-            df = manager.load_data(symbol, interval)
-            if df is None or df.empty:
-                ui.notification_show("No data available", type="error")
-                return
+            p.set(50, message="Calibrating...")
             
-            if 'open_time' in df.columns:
-                df = df.set_index(pd.to_datetime(df['open_time']))
-
-            p.set(40, message="Calibrating Volume...")
-            opt_vol = calibrate_bar_threshold(df, "Volume Bars")
-            if opt_vol:
-                ui.update_numeric("diag_vol_th", value=int(opt_vol))
-                
-            p.set(70, message="Calibrating Dollar...")
-            opt_dollar = calibrate_bar_threshold(df, "Dollar Bars")
-            if opt_dollar:
-                ui.update_numeric("diag_dollar_th", value=int(opt_dollar))
-            
-            p.set(100, message="Complete")
-            ui.notification_show(f"✓ Calibrated! Vol: {opt_vol:,}, Dollar: {opt_dollar:,}", type="message")
+            payload = {
+                "symbol": symbol,
+                "interval": interval
+            }
+            try:
+                res = requests.post(f"{API_BASE_URL}/diagnostics/calibrate-bars", json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    opt_vol = data.get("vol_th")
+                    opt_dollar = data.get("dollar_th")
+                    
+                    if opt_vol:
+                        ui.update_numeric("diag_vol_th", value=int(opt_vol))
+                    if opt_dollar:
+                        ui.update_numeric("diag_dollar_th", value=int(opt_dollar))
+                    
+                    p.set(100, message="Complete")
+                    ui.notification_show(f"✓ Calibrated! Vol: {opt_vol:,}, Dollar: {opt_dollar:,}", type="message")
+                else:
+                    ui.notification_show(f"Calibration error: {res.text}", type="error")
+            except Exception as e:
+                logger.log("Symbol Diagnostics", "ERROR", f"Auto calibrate failed: {e}")
+                ui.notification_show(f"API Connection error: {str(e)}", type="error")
 
     @render_widget
     def plot_financial_bars():

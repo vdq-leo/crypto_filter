@@ -112,14 +112,17 @@ def generate_pair_radar(req: PairRequest):
 
         r2 = r_val**2
         # Bollinger Bands for synthetic spread
-        synthetic["ma"] = synthetic["close"].rolling(window=20).mean()
-        synthetic["std"] = synthetic["close"].rolling(window=20).std()
-        synthetic["bb_up"] = synthetic["ma"] + (synthetic["std"] * 2)
-        synthetic["bb_dn"] = synthetic["ma"] - (synthetic["std"] * 2)
+        synthetic["ma"] = synthetic["close"].rolling(window=req.rolling_window).mean()
+        synthetic["std"] = synthetic["close"].rolling(window=req.rolling_window).std()
+        synthetic["bb_up"] = synthetic["ma"] + (synthetic["std"] * 1.8)
+        synthetic["bb_dn"] = synthetic["ma"] - (synthetic["std"] * 1.8)
         synthetic = synthetic.bfill()
 
         z_local = calculate_rolling_zscore(synthetic["close"], req.rolling_window)
         synthetic["zscore"] = z_local
+        
+        synthetic["corr_pearson"] = synthetic["log_ret_a"].rolling(req.rolling_window).corr(synthetic["log_ret_b"])
+        synthetic["corr_pearson_price"] = synthetic["price_a"].rolling(req.rolling_window).corr(synthetic["price_b"])
         
         # --- COPULA CALCULATIONS ---
         copula_data = {}
@@ -205,8 +208,10 @@ def generate_pair_radar(req: PairRequest):
         except Exception as e:
              logger.error(f"Comp extraction failed: {e}")
 
-        # Basic chart data
-        chart_data = synthetic.tail(req.pair_window).reset_index()
+        # Basic chart data - return full synthetic data so UI can slice it
+        chart_data = synthetic.reset_index()
+        if "index" in chart_data.columns:
+            chart_data = chart_data.rename(columns={"index": "open_time"})
         chart_data["open_time"] = chart_data["open_time"].astype(str)
         chart_data = chart_data.replace([np.inf, -np.inf], None).where(pd.notnull(chart_data), None)
 
@@ -217,12 +222,41 @@ def generate_pair_radar(req: PairRequest):
             "metrics": {
                 "Coefficient": np_safe(slope),
                 "VolRatio": np_safe(vol_Ratio),
+                "HalfLife": np_safe(-np.log(2) / np.polyfit(residuals[-req.rolling_window:-1], np.diff(residuals[-req.rolling_window:]), 1)[0] if len(residuals) >= req.rolling_window and np.polyfit(residuals[-req.rolling_window:-1], np.diff(residuals[-req.rolling_window:]), 1)[0] < 0 else np.nan),
+                "SpreadVol": np_safe(np.std(residuals[-req.rolling_window:]) * np.sqrt(MetricsEngine.get_annual_scaling(req.interval))),
+                "BetaStability": np_safe(np.nanstd((pd.Series(y).rolling(req.rolling_window).cov(pd.Series(x)) / pd.Series(x).rolling(req.rolling_window).var().replace(0, 1e-9)).values) if len(y) > req.rolling_window else np.nan),
+                "P_Correlation": np_safe(np.corrcoef(x, y)[0, 1]),
+                "R_Correlation": np_safe(np.corrcoef(synthetic["log_ret_a"].dropna(), synthetic["log_ret_b"].dropna())[0, 1]),
                 "ADF_P": np_safe(adf_p),
                 "R2": np_safe(r2)
             },
             "chart_data": chart_data.to_dict(orient="records"),
             "copula": copula_data,
             "comp": comp_data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class CopulaRequest(BaseModel):
+    u: List[float]
+    v: List[float]
+    u_curr: float
+    v_curr: float
+    copula_type: str = "t"
+    copula_param: float = 2.0
+
+@router.post("/copula")
+def generate_copula(req: CopulaRequest):
+    try:
+        kwargs = {}
+        if req.copula_type == "t": kwargs["df"] = req.copula_param
+        else: kwargs["theta"] = req.copula_param
+        
+        p_uv, p_vu = copula_cond_probs(np.array(req.u), np.array(req.v), req.u_curr, req.v_curr, method=req.copula_type, **kwargs)
+        
+        return {
+            "p_uv": float(p_uv),
+            "p_vu": float(p_vu)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

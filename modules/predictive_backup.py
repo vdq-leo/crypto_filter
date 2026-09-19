@@ -33,12 +33,39 @@ from ml_engine.labeling.labeler import Labeler, TripleBarrierLabeler, Stationari
 from src.logger import logger
 from src.backtest import BacktestEngine
 from src.shared_state import get_manager, get_engine
-from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold   
+from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
+from src.config import API_BASE_URL
+import requests
 
 def meta_sizing_cal(meta_probs):
     """Calibrate meta probabilities to sizing"""
     # return np.clip(2 * meta_probs - 1, 0, 1)
     return np.where(meta_probs > 0.5, meta_probs, 0)
+
+def restore_df(json_data):
+    """Restore DataFrame or Series from sanitized JSON"""
+    if json_data is None:
+        return None
+    
+    if isinstance(json_data, dict):
+        if "columns" in json_data and "index" in json_data and "data" in json_data:
+            df = pd.DataFrame(json_data["data"], columns=json_data["columns"], index=json_data["index"])
+            if "open_time" in df.columns:
+                df["open_time"] = pd.to_datetime(df["open_time"])
+                try:
+                    df.index = pd.to_datetime(df.index)
+                except:
+                    pass
+            return df
+        elif "index" in json_data and "data" in json_data:
+            s = pd.Series(json_data["data"], index=json_data["index"])
+            try:
+                s.index = pd.to_datetime(s.index)
+            except:
+                pass
+            return s
+    
+    return json_data
 
 def recursive_unwrap(model):
     """Recursively peel off model wrappers to find the base model for SHAP."""
@@ -455,8 +482,6 @@ def predictive_server(input, output, session):
     @reactive.event(input.btn_auto_calibrate)
     async def auto_calibrate_thresholds():
         """Auto-calibrate Volume and Dollar thresholds to minimize normality loss"""
-        # Get current ticker and interval
-        # Directional Analysis
         ticker = input.selected_ticker()
         
         if not ticker:
@@ -464,200 +489,141 @@ def predictive_server(input, output, session):
             return
         
         interval = input.interval()
-        df = manager.load_data(ticker, interval)
-        if df is None or df.empty:
-            ui.notification_show(f"No data available for {ticker}.", type="error")
-            return
-        
-        if 'open_time' in df.columns:
-            df = df.set_index(pd.to_datetime(df['open_time']))
-        
         ui.notification_show(f"Calibrating thresholds for {ticker}", duration=5)
 
-        # Use shared utility
-        optimal_vol = calibrate_bar_threshold(df, "Volume Bars")
-        optimal_dollar = calibrate_bar_threshold(df, "Dollar Bars")
-        
-        if optimal_vol:
-            vol_th_sync.set(optimal_vol)
-            ui.update_numeric("vol_bar_th", value=optimal_vol)
-            
-        if optimal_dollar:
-            dollar_th_sync.set(optimal_dollar)
-            ui.update_numeric("dollar_bar_th", value=optimal_dollar)
-        
-        ui.notification_show(
-            f"✓ Calibration complete! Volume: {optimal_vol:,}, Dollar: {optimal_dollar:,}",
-            type="message",
-            duration=10
-        )
-        logger.log("Predictive", "INFO", f"Calibrated thresholds - Vol: {optimal_vol}, Dollar: {optimal_dollar}")
-        
-        # Trigger engineering with new thresholds
-        eng_trigger.set(eng_trigger.get() + 1)
+        try:
+            res = requests.post(f"{API_BASE_URL}/predictive/calibrate", json={
+                "ticker": ticker,
+                "interval": interval
+            })
+            if res.status_code == 200:
+                data = res.json()
+                optimal_vol = data.get("volume")
+                optimal_dollar = data.get("dollar")
+                
+                if optimal_vol:
+                    vol_th_sync.set(optimal_vol)
+                    ui.update_numeric("vol_bar_th", value=optimal_vol)
+                    
+                if optimal_dollar:
+                    dollar_th_sync.set(optimal_dollar)
+                    ui.update_numeric("dollar_bar_th", value=optimal_dollar)
+                
+                ui.notification_show(
+                    f"✓ Calibration complete! Volume: {optimal_vol:,}, Dollar: {optimal_dollar:,}",
+                    type="message",
+                    duration=10
+                )
+                logger.log("Predictive", "INFO", f"Calibrated thresholds - Vol: {optimal_vol}, Dollar: {optimal_dollar}")
+                
+                eng_trigger.set(eng_trigger.get() + 1)
+            else:
+                ui.notification_show(f"Calibration failed: {res.text}", type="error")
+        except Exception as e:
+            logger.log("Predictive", "ERROR", f"API Error: {e}")
+            ui.notification_show(f"API Connection error: {str(e)}", type="error")
 
     @reactive.calc
     @reactive.event(eng_trigger)
     def engineering_result():
-        # Get Current Symbol and Interval context
-        # Determine ticker
         ticker = input.selected_ticker()
         interval = input.interval()
         if not ticker or not interval: return None
-        df = manager.load_data(ticker, interval)
-        if df is None or df.empty: return None
         
-        # Consistent Indexing
-        if 'open_time' in df.columns:
-            df = df.set_index(pd.to_datetime(df['open_time']))
-            
-        # 1. Time Bars (Original)
-        time_df = df.copy()
-        time_df['ret'] = np.log(time_df['close'] / time_df['close'].shift(1))
-        
-        # 2. Volume Bars
         v_sync = vol_th_sync.get()
         vol_th = v_sync if v_sync is not None else input.vol_bar_th()
-        vol_df = construct_volume_bars(df, vol_th)
-        if not vol_df.empty:
-            vol_df['ret'] = np.log(vol_df['close'] / vol_df['close'].shift(1))
-            
-        # 3. Dollar Bars
+        
         d_sync = dollar_th_sync.get()
         dollar_th = d_sync if d_sync is not None else input.dollar_bar_th()
-        dollar_df = construct_dollar_bars(df, dollar_th)
-        if not dollar_df.empty:
-            dollar_df['ret'] = np.log(dollar_df['close'] / dollar_df['close'].shift(1))
-            
-        # Update Cache for run_analysis
-        engineered_data.set({
-            "volume": vol_df,
-            "dollar": dollar_df,
-            "ticker": ticker,
-            "interval": interval
-        })
-            
-        return {
-            "time": time_df,
-            "volume": vol_df,
-            "dollar": dollar_df,
-            "ticker": ticker
-        }
+
+        try:
+            res = requests.post(f"{API_BASE_URL}/predictive/engineering", json={
+                "ticker": ticker,
+                "interval": interval,
+                "vol_th": int(vol_th),
+                "dollar_th": int(dollar_th)
+            })
+            if res.status_code == 200:
+                data = res.json()
+                time_df = restore_df(data.get("time"))
+                vol_df = restore_df(data.get("volume"))
+                dollar_df = restore_df(data.get("dollar"))
+                
+                engineered_data.set({
+                    "volume": vol_df,
+                    "dollar": dollar_df,
+                    "ticker": ticker,
+                    "interval": interval
+                })
+                    
+                return {
+                    "time": time_df,
+                    "volume": vol_df,
+                    "dollar": dollar_df,
+                    "ticker": ticker
+                }
+            else:
+                ui.notification_show(f"Engineering error: {res.text}", type="error")
+                return None
+        except Exception as e:
+            logger.log("Predictive", "ERROR", f"Engineering API error: {e}")
+            ui.notification_show(f"API Error: {str(e)}", type="error")
+            return None
 
     @reactive.calc
     @reactive.event(input.btn_run_feature_analysis)
     def feature_analysis_result():
-        # Requires engineering to have run
         eng = engineering_result()
         if eng is None:
             ui.notification_show("Please click 'Apply Engineering' first.", type="error")
             return None
             
-        # Get selected bar type
         b_type = input.bar_type()
-        target_key = "time" if b_type == "Time Bars" else ("volume" if b_type == "Volume Bars" else "dollar")
-        df = eng.get(target_key)
-        
-        if df is None or df.empty:
-            ui.notification_show(f"No data for {b_type}. Apply engineering first.", type="error")
-            return None
-            
-        # Select features
         features = list(input.eng_features())
         if not features:
             ui.notification_show("Please select at least one feature.", type="warning")
             return None
             
-        # Params from UI
-        lookback = input.eng_lookback()
-        min_s = input.eng_min_samples()
-        v_th = input.vif_th()
-        window = input.pred_lookback()
+        v_sync = vol_th_sync.get()
+        vol_th = v_sync if v_sync is not None else input.vol_bar_th()
+        
+        d_sync = dollar_th_sync.get()
+        dollar_th = d_sync if d_sync is not None else input.dollar_bar_th()
 
-        # Calculate features using MetricsEngine
         try:
-            # We need standard OHLCV for MetricsEngine
-            calc_df = df.copy()
-            calc_df = calc_df.iloc[-(window + lookback):]
-            # Ensure volume column exists for internal indicators
-            if 'dollar_vol' in calc_df.columns and 'volume' not in calc_df.columns:
-                calc_df['volume'] = calc_df['dollar_vol'] / calc_df['close']
-            
-            # Check if sufficient data length for lookback
-            if len(calc_df) < lookback + 10:
-                ui.notification_show(f"Insufficient data ({len(calc_df)}) for lookback {lookback}.", type="error")
-                return None
-
-            # Fetch benchmark prices for relative indicators
-            bench_df = get_manager().load_data(BENCHMARK_SYMBOL, input.pred_interval(), auto_sync=False)
-            bench_prices = bench_df['close'] if bench_df is not None and not bench_df.empty else None
-
-            feat_df = engine.calculate_all_indicators(calc_df, window=lookback, benchmark_prices=bench_prices)
-            
-            # Filter to selected features
-            valid_feats = [f for f in features if f in feat_df.columns and not feat_df[f].isna().all()]
-            if not valid_feats:
-                ui.notification_show("None of the selected features could be calculated (all NaNs).", type="error")
-                return None
-                
-            feat_df = feat_df[valid_feats].dropna()
-            
-            if len(feat_df) < min_s:
-                ui.notification_show(f"Only {len(feat_df)} samples remaining after lookback/NaN removal. Need {min_s}.", type="warning")
-                return None
-            
-            # Feature Stats (Stats + VIF)
-            stats_list = []            
-            vif_dict = {}
-            if len(valid_feats) > 1:
-                # Multicollinearity check
-                try:
-                    # Drop constant columns if any (std=0)
-                    X_vif = feat_df.loc[:, feat_df.std() > 0]
-                    if not X_vif.empty and X_vif.shape[1] > 1:
-                        X = sm.add_constant(X_vif)
-                        for i, col in enumerate(X_vif.columns):
-                            v = variance_inflation_factor(X.values, i + 1)
-                            vif_dict[col] = min(v, 99.0) # Cap for display
-                except:
-                    pass
-            
-            for col in valid_feats:
-                s = feat_df[col].describe()
-                vif = vif_dict.get(col, 1.0)
-                
-                # Highlight or filter? User said "VIF threshold filter"
-                # I'll keep them in stats but maybe flag them? 
-                # Actually, let's filter the final feat_df for the plot if VIF > threshold
-                
-                stats_list.append({
-                    "Feature": col,
-                    "Mean": s['mean'],
-                    "Std": s['std'],
-                    "Skew": skew(feat_df[col]),
-                    "Kurtosis": kurtosis(feat_df[col], fisher=True),
-                    "VIF": vif,
-                    "Keep": "YES" if vif <= v_th else "NO"
-                })
-            
-            stats_df = pd.DataFrame(stats_list)
-            
-            # Filter feat_df for plot and further use
-            clean_feats = [s['Feature'] for s in stats_list if s['VIF'] <= v_th]
-            feat_df_clean = feat_df[clean_feats] if clean_feats else pd.DataFrame()
-
-            return {
-                "feat_df": feat_df,
-                "feat_df_clean": feat_df_clean,
-                "stats_df": stats_df,
-                "bar_type": b_type,
+            res = requests.post(f"{API_BASE_URL}/predictive/features", json={
                 "ticker": eng['ticker'],
-                "vif_threshold": v_th
-            }
+                "interval": input.interval(),
+                "features": features,
+                "eng_lookback": input.eng_lookback(),
+                "eng_min_samples": input.eng_min_samples(),
+                "vif_th": input.vif_th(),
+                "pred_lookback": input.pred_lookback(),
+                "bar_type": b_type,
+                "vol_th": int(vol_th),
+                "dollar_th": int(dollar_th)
+            })
             
+            if res.status_code == 200:
+                data = res.json()
+                feat_df = restore_df(data.get("feat_df"))
+                feat_df_clean = restore_df(data.get("feat_df_clean"))
+                stats_df = pd.DataFrame(data.get("stats_df", []))
+                
+                return {
+                    "feat_df": feat_df,
+                    "feat_df_clean": feat_df_clean,
+                    "stats_df": stats_df,
+                    "bar_type": data.get("bar_type"),
+                    "ticker": eng['ticker'],
+                    "vif_threshold": data.get("vif_threshold")
+                }
+            else:
+                ui.notification_show(f"Analysis Error: {res.text}", type="error")
+                return None
         except Exception as e:
-            logger.log("Predictive", "ERROR", f"Feature analysis error: {e}")
-            ui.notification_show(f"Analysis Error: {e}", type="error")
+            logger.log("Predictive", "ERROR", f"Feature analysis API error: {e}")
+            ui.notification_show(f"API Error: {str(e)}", type="error")
             return None
 
     @reactive.effect
@@ -767,94 +733,645 @@ def predictive_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_run_analysis)
     async def run_analysis():
-        """Run ML analysis via API"""
-        direction = input.trade_direction()
-        tickers = inventory.get()
-        if not tickers:
-            ui.notification_show("Please add at least one ticker.", type="warning")
+        # 0. Wait for essentials safely
+        if input.reg_type() is None or input.interval() is None:
+            logger.log("Predictive", "INFO", "Waiting for UI inputs to initialize...")
+            ui.notification_show("Please wait for the interface to load", type="warning")
             return
-            
-        interval = input.interval()
-        features = list(input.eng_features())
-        if not features:
-            ui.notification_show("Please select features in Data Engineering.", type="warning")
-            return
-            
-        v_sync = vol_th_sync.get()
-        vol_th = v_sync if v_sync is not None else input.vol_bar_th()
-        d_sync = dollar_th_sync.get()
-        dollar_th = d_sync if d_sync is not None else input.dollar_bar_th()
-            
-        req_data = {
-            "tickers": tickers,
-            "interval": interval,
-            "trade_direction": direction,
-            "features": features,
-            "reg_type": input.reg_type(),
-            "test_ratio": input.test_ratio(),
-            "rf_max_depth": input.rf_max_depth(),
-            "eng_lookback": input.eng_lookback(),
-            "pred_lookback": input.pred_lookback(),
-            "min_samples": input.min_samples(),
-            "standardize_flag": input.standardize_flag(),
-            "vif_th": input.vif_th(),
-            "bar_type": input.bar_type(),
-            "vol_th": int(vol_th),
-            "dollar_th": int(dollar_th),
-            "labeler_type": input.labeler_type(),
-            "labeler_params": {
-                "amp_th": input.labeler_amp_th(),
-                "max_inactive": input.labeler_max_inactive(),
-                "vol_window": input.tbm_vol_window(),
-                "upper_mult": input.tbm_upper_mult(),
-                "lower_mult": input.tbm_lower_mult(),
-                "max_holding": input.tbm_max_holding(),
-                "stat_window": input.stat_window(),
-                "vote_th": input.stat_vote_th(),
-                "tail_window": input.tail_window(),
-                "tail_threshold": input.tail_threshold()
-            },
-            "max_positions": input.max_positions(),
-            "tp_mult_bt": input.tp_mult_bt(),
-            "sl_mult_bt": input.sl_mult_bt(),
-            "min_holding_bt": input.min_holding_bt(),
-            "max_holding_bt": input.max_holding_bt()
-        }
-        
-        ui.notification_show("Running ML Analysis via API...", duration=5)
+
+        logger.log("Predictive", "INFO", "--- Analysis Triggered ---")
         
         try:
-            import requests
-            from src.config import API_BASE_URL
-            import pandas as pd
-            res = requests.post(f"{API_BASE_URL}/predictive/analyze", json=req_data)
-            if res.status_code == 200:
-                data = res.json()
+            logger.log("Predictive", "INFO", "Step 0: Reading UI inputs")
+            is_classification = True
+            # Read dynamic ticker selection
+            tickers = [input.selected_ticker()]
                 
-                # Reconstruct pandas DataFrame and Series objects from the JSON strings
-                import json
+            if not tickers:
+                ui.notification_show("Select at least one ticker", type="error")
+                return
+
+            # Read features
+            x_features = list(input.eng_features())
+            if not x_features:
+                ui.notification_show("Select at least one predictor feature", type="error")
+                return
+
+            # Read remaining params
+            reg_type = input.reg_type()
+            test_ratio = input.test_size() / 100.0
+            
+            rf_max_depth = input.rf_max_depth() if ("RF" in reg_type or "XGB" in reg_type) else None
+            interval = input.interval()
+            ind_window = input.eng_lookback()
+            fwd_window = 1
+            min_samples = input.eng_min_samples()
+            standardize_flag = input.standardize()
+
+            # 1. Gather Data
+            logger.log("Predictive", "INFO", f"Step 1: Gathering data for {len(tickers)} symbols")
+            total_steps = len(tickers) + 7  # tickers + preprocess + VIF + primary + meta + backtest + SHAP + store
+            with ui.Progress(min=0, max=total_steps) as p:
+                p.set(0, message="Stacking data...")
+                all_rows = []
                 
-                def restore_df(json_str):
-                    if not json_str: return None
-                    return pd.read_json(json.dumps(json_str), orient="split")
-                def restore_series(json_str):
-                    if not json_str: return None
-                    return pd.read_json(json.dumps(json_str), orient="split", typ="series")
+                # Check Bar Type and Cache
+                b_type = input.bar_type()
+                eng_cache = engineered_data.get()
                 
-                data["X_test"] = restore_df(data["X_test"])
-                data["y_test"] = restore_series(data["y_test"])
-                data["y_test_preds"] = restore_series(data["y_test_preds"])
+                # Labeler params from UI
+                l_params = None
+                l_type = input.labeler_type()
+                if l_type == "Trend": 
+                    l_params = {'type': "Trend", 'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive()}
+                elif l_type == "BoxRange": 
+                    l_params = {'type': "BoxRange", 'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()}
+                elif l_type == "Combine":
+                    l_params = {
+                        'type': "Combine", 
+                        'amp_th': input.amp_th_bps(), 'max_inactive': input.max_inactive(),
+                        'vol_window': input.vol_window(), 'upper_mult': input.upper_mult(), 'lower_mult': input.lower_mult(), 'max_holding': input.max_holding()
+                    }
+                elif l_type == "Regime": 
+                    l_params = {'type': "Regime", 'window': input.stat_window(), 'vote_th': input.vote_th()}
+                else:
+                    l_params = {'type': "TailSet", 'window': input.tail_window(), 'threshold': input.tail_threshold()}
+
+                for i, sym in enumerate(tickers):
+                    df = None
+                    if b_type == "Time Bars":
+                        df = manager.load_data(sym, interval)
+                    else:
+                        # Use Engineered Cache
+                        target_key = "volume" if b_type == "Volume Bars" else "dollar"
+                        if eng_cache["ticker"] == sym and eng_cache["interval"] == interval and eng_cache[target_key] is not None:
+                            df = eng_cache[target_key]
+                        else:
+                            ui.notification_show(f"Engineered data for {sym} ({interval}) not found. Please click 'Apply Engineering' in the Data Engineering tab first.", type="error")
+                            return
+
+                    if df is not None and len(df) > max(ind_window, fwd_window) + 10:
+                        if 'open_time' in df.columns:
+                            df = df.set_index(pd.to_datetime(df['open_time']))
+                        
+                        # Apply constraint: limit to latest pred_lookback + eng_lookback
+                        df = df.iloc[-(input.pred_lookback() + input.eng_lookback()):]
+                        
+                        try:
+                            # Optimized: Calculate all metrics once per ticker instead of per feature
+                            all_metrics_df = engine.calculate_all_indicators(df, window=ind_window, interval=interval)
+                            feats_data = {feat: all_metrics_df[feat] for feat in x_features if feat in all_metrics_df.columns}
+                            
+                            # Check label cache first
+                            cache_key = f"{sym}_{interval}_{b_type}_{l_params['type']}"
+                            
+                            label_cache = labeled_data.get()
+                            if cache_key in label_cache:
+                                print(f"✓ Using cached labels for {sym} (key: {cache_key})")
+                                y_series = label_cache[cache_key]['y']
+                            else:
+                                print(f"⚠ No cached labels found for {sym}, calculating new labels...")
+                                # Classification (Directional)
+                                prices = df['close']
+                                if l_params['type'] == "Trend":
+                                    lobj = Labeler(amplitude_threshold=l_params['amp_th'], max_inactive_period=l_params['max_inactive'])
+                                    y_series = lobj.label(prices)['label']
+                                elif l_params['type'] == "BoxRange":
+                                    lobj = TripleBarrierLabeler(vol_window=l_params['vol_window'], upper_mult=l_params['upper_mult'], lower_mult=l_params['lower_mult'], max_holding_period=l_params['max_holding'])
+                                    y_series = lobj.label(prices)['label']
+                                elif l_params['type'] == "Combine":
+                                    lobj = CombinedLabeler(
+                                        amplitude_threshold=l_params['amp_th'], 
+                                        max_inactive_period=l_params['max_inactive'],
+                                        vol_window=l_params['vol_window'], 
+                                        upper_mult=l_params['upper_mult'], 
+                                        lower_mult=l_params['lower_mult'], 
+                                        max_holding=l_params['max_holding']
+                                    )
+                                    y_series = lobj.label(prices)['label']
+                                elif l_params['type'] == "Regime":
+                                    lobj = StationarityLabeler(window=l_params['window'], vote_th=l_params['vote_th'])
+                                    y_series, _ = lobj.label(prices)
+                                elif l_params['type'] == "TailSet":
+                                    w = l_params['window'] if l_params['window'] > 0 else 1
+                                    lobj = TailSetLabeler(ret_window=w, threshold=l_params['threshold'])
+                                    y_series = lobj.label(prices)['label']
+                                
+                                y_series.index = prices.index
+                                
+                                # Shift Correction for forward prediction
+                                if l_params['type'] == "TailSet" and l_params['window'] > 1:
+                                    y_series = y_series.shift(-l_params['window'])
+                                else:
+                                    y_series = y_series.shift(-1)
+                            # Filter targets based on Trade Direction
+                            if is_classification:
+                                direction = input.trade_direction()
+                                if direction == "Long Only":
+                                    y_series = y_series.where(y_series > 0, 0)
+                                elif direction == "Short Only":
+                                    y_series = y_series.where(y_series < 0, 0)
+                                # For "Long/Short Combine" and "Both Sides", we keep the original [-1, 0, 1]
+
+                            temp_df = pd.DataFrame(feats_data)
+                            temp_df['Target_Y'] = y_series
+                            temp_df['raw_return'] = np.log(pd.to_numeric(df['close'], errors='coerce').ffill() / pd.to_numeric(df['close'], errors='coerce').ffill().shift(1)).shift(-1)
+                            temp_df = temp_df.dropna()
+                            
+                            if len(temp_df) >= min_samples:
+                                all_rows.append(temp_df)
+                        except Exception as e:
+                            logger.log("Predictive", "WARNING", f"Error processing {sym}: {str(e)}")
+                    
+                    p.set(i + 1)
+                    await asyncio.sleep(0.01)
                 
-                if data["shap_results"] is not None:
-                    data["shap_results"] = restore_df(data["shap_results"])
+                if not all_rows:
+                    logger.log("Predictive", "ERROR", "No valid data points found after stacking")
+                    ui.notification_show("No valid data points found. Try increasing lookback or symbols.", type="error")
+                    return
+                logger.log("Predictive", "INFO", f"Step 2: Preprocessing stacked data ({sum(len(df) for df in all_rows)} rows)")
+                step = len(tickers)
+                p.set(step, message="Preprocessing & cleaning data...")
+                final_df = pd.concat(all_rows).sort_index()
                 
-                results.set(data)
-                ui.notification_show("Analysis Complete!", type="message", duration=5)
-            else:
-                ui.notification_show(f"API Error: {res.text}", type="error", duration=10)
+                X_data = final_df[x_features].copy()
+                Y_data = final_df['Target_Y'].copy()
+                Y_ret = final_df['raw_return']
+                
+                # Aggressive numeric force for all features (handle boxed values/strings)
+                X_data = force_scalar_numeric(X_data)
+                
+                # Clean Infs/NaNs
+                combined = pd.concat([X_data, Y_data, Y_ret], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
+                X_data, Y_data, Y_ret = combined[x_features], combined['Target_Y'], combined['raw_return']
+                
+                if standardize_flag:
+                    logger.log("Predictive", "INFO", "Standardizing features")
+                    p.set(message="Standardizing features...")
+                    for f in x_features:
+                        if f in X_data.columns:
+                            m, s = X_data[f].mean(), X_data[f].std()
+                            if s > 1e-9: X_data[f] = (X_data[f] - m) / s
+                
+                # Check for manually filtered features from Data Engineering tab Cache
+                cached_feats = filtered_features.get()
+                if cached_feats and all(f in x_features for f in cached_feats):
+                    logger.log("Predictive", "INFO", f"Using {len(cached_feats)} manually filtered features from cache.")
+                    active_features = cached_feats
+                else:
+                    logger.log("Predictive", "INFO", "Running VIF filter (no cache or mismatch)")
+                    step += 1
+                    p.set(step, message="Running VIF filter...")
+                    vif_threshold = input.vif_th()
+                    active_features = FeatureSelector.apply_vif_filter(X_data, threshold=vif_threshold) if len(x_features) > 1 else x_features
+                
+                if not active_features:
+                    logger.log("Predictive", "ERROR", "No features left after VIF filter")
+                    ui.notification_show("No features left after VIF filter. Try a higher VIF threshold or fewer predictors.", type="error")
+                    return
+                    
+                X_raw = X_data[active_features].copy()
+                
+                # 3-Fold Sequential Split
+                n = len(X_raw)
+                test_start = int(n * (1 - test_ratio))
+                
+                # Auto-Split Training set into 2 folds:
+                train_n = test_start
+                meta_start = int(train_n * 0.6)
+                
+                logger.log("Predictive", "INFO", f"Splitting data: n={n}, test_start={test_start}, auto-split train at {meta_start}")
+                
+                # Part 1: Primary Train
+                X_train_primary = X_raw.iloc[:meta_start]
+                y_train_primary = Y_data.iloc[:meta_start]
+                y_ret_primary = Y_ret.iloc[:meta_start]
+                
+                # Part 2: Meta Train
+                X_train_meta = X_raw.iloc[meta_start:test_start]
+                y_train_meta = Y_data.iloc[meta_start:test_start]
+                y_ret_meta = Y_ret.iloc[meta_start:test_start]
+                
+                # Part 3: Test
+                X_test = X_raw.iloc[test_start:]
+                y_test = Y_data.iloc[test_start:]
+                y_ret_test = Y_ret.iloc[test_start:]
+                
+                logger.log("Predictive", "INFO", f"Sequential Split - Primary: {len(X_train_primary)}, Meta: {len(X_train_meta)}, Test: {len(X_test)}")
+                # 3. Train Primary
+                logger.log("Predictive", "INFO", f"Step 3: Training Primary model ({reg_type})")
+                step += 1
+                p.set(step, message=f"Training Primary model ({reg_type})...")
+                direction_ui = input.trade_direction()
+                
+                if direction_ui == "Long/Short Combine":
+                    # TRAIN LONG
+                    y_train_long = y_train_primary.where(y_train_primary > 0, 0)
+                    model_long = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                    model_long.fit(X_train_primary, y_train_long)
+                    if is_classification:
+                        long_cal = {}
+                        p_tr_l = model_long.predict_proba(X_train_primary)
+                        c2i_l = {c: i for i, c in enumerate(model_long.classes_)}
+                        for c in model_long.classes_:
+                            y_c = (y_train_long == c).astype(int)
+                            long_cal[c] = IsotonicCalibrator().fit(p_tr_l[:, c2i_l[c]], y_c)
+                        model_long = CalibratedModelWrapper(model_long, long_cal, c2i_l)
+                        
+                    # TRAIN SHORT
+                    y_train_short = y_train_primary.where(y_train_primary < 0, 0)
+                    model_short = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                    model_short.fit(X_train_primary, y_train_short)
+                    if is_classification:
+                        short_cal = {}
+                        p_tr_s = model_short.predict_proba(X_train_primary)
+                        c2i_s = {c: i for i, c in enumerate(model_short.classes_)}
+                        for c in model_short.classes_:
+                            y_c = (y_train_short == c).astype(int)
+                            short_cal[c] = IsotonicCalibrator().fit(p_tr_s[:, c2i_s[c]], y_c)
+                        model_short = CalibratedModelWrapper(model_short, short_cal, c2i_s)
+                        
+                    model = CombinedLongShortModelWrapper(model_long, model_short)
+                else:
+                    model = ModelFactory.create_model(reg_type, n_estimators=200, max_depth=rf_max_depth)
+                    model.fit(X_train_primary, y_train_primary)
+                    
+                    if is_classification:
+                        primary_calibrators = {}
+                        p_train_proba = model.predict_proba(X_train_primary)
+                        class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                        for c in model.classes_:
+                            ci = class_to_index[c]
+                            y_c = (y_train_primary == c).astype(int)
+                            primary_calibrators[c] = IsotonicCalibrator().fit(p_train_proba[:, ci], y_c)
+                        model = CalibratedModelWrapper(model, primary_calibrators, class_to_index)
+                
+                logger.log("Predictive", "INFO", "Primary model training & calibration complete")
+
+                # 4. Train Meta-Model using Sophisticated Backtest
+                meta_model = None
+                meta_results = {}
+                try:
+                    logger.log("Predictive", "INFO", "Step 4: Training Meta-model")
+                    step += 1
+                    p.set(step, message="Training Meta-model & Backtest...")
+
+                    direction = input.trade_direction()
+                    
+                    if direction == "Long/Short Combine":
+                        def train_meta(model_sub, y_train_meta_sub, direction_sub):
+                            p_meta_input = model_sub.predict(X_train_meta)
+                            p_meta_proba = model_sub.predict_proba(X_train_meta)
+                            c2i = {c: i for i, c in enumerate(model_sub.classes_)}
+                            pred_index = np.array([c2i[c] for c in p_meta_input])
+                            pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
+                            
+                            p_meta_signals = pd.Series([sig if conf > 0.5 else 0 for sig, conf in zip(p_meta_input, pred_conf)], index=X_train_meta.index)
+                            
+                            if direction_sub == "Long Only": p_meta_signals = p_meta_signals.where(p_meta_signals > 0, 0)
+                            if direction_sub == "Short Only": p_meta_signals = p_meta_signals.where(p_meta_signals < 0, 0)
+
+                            y_meta = (p_meta_signals == y_train_meta_sub).astype(int)
+                            meta_features = pd.concat([X_train_meta, pd.Series(p_meta_signals, index=X_train_meta.index, name='primary_pred')], axis=1)
+                            
+                            m_model = LogisticRegression(max_iter=10000, class_weight='balanced')
+                            m_model.fit(meta_features, y_meta)
+                            
+                            m_cal = {}
+                            m_tr_pb = m_model.predict_proba(meta_features)
+                            m_c2i = {c: i for i, c in enumerate(m_model.classes_)}
+                            for c in m_model.classes_:
+                                m_cal[c] = IsotonicCalibrator().fit(m_tr_pb[:, m_c2i[c]], (y_meta == c).astype(int))
+                            m_model = CalibratedModelWrapper(m_model, m_cal, m_c2i)
+                            
+                            return m_model, p_meta_signals
+                            
+                        meta_model_long, p_meta_sig_l = train_meta(model.model_long, y_train_meta.where(y_train_meta > 0, 0), "Long Only")
+                        meta_model_short, p_meta_sig_s = train_meta(model.model_short, y_train_meta.where(y_train_meta < 0, 0), "Short Only")
+                        
+                        meta_model = CombinedLongShortModelWrapper(meta_model_long, meta_model_short)
+                        p_meta_signals = p_meta_sig_l + p_meta_sig_s
+                        y_meta = (p_meta_signals == y_train_meta).astype(int)
+                    else:
+                        # Get Primary predictions on the Meta fold
+                        p_meta_input = model.predict(X_train_meta)                        
+                        p_meta_signals = pd.Series(p_meta_input, index=X_train_meta.index)
+
+                        # Get class probabilities
+                        p_meta_proba = model.predict_proba(X_train_meta)  # shape = (n_samples, n_classes)
+                        # Map predicted class to probability
+                        class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                        pred_index = np.array([class_to_index[c] for c in p_meta_input])
+                        pred_conf = p_meta_proba[np.arange(len(pred_index)), pred_index]
+                        
+                        # Keep signal only if probability > 0.5, else 0 (no trade)
+                        p_meta_signals = pd.Series([
+                            sig if conf > 0.5 else 0
+                            for sig, conf in zip(p_meta_input, pred_conf)
+                        ], index=X_train_meta.index)
+                                        
+                        if direction == "Long Only":
+                            p_meta_signals = p_meta_signals.where(p_meta_signals > 0, 0)
+                        elif direction == "Short Only":
+                            p_meta_signals = p_meta_signals.where(p_meta_signals < 0, 0)
+
+                        y_meta = (p_meta_signals == y_train_meta).astype(int)
+
+                        # Meta features = original features + primary prediction
+                        meta_features = pd.concat([X_train_meta, pd.Series(p_meta_signals, index=X_train_meta.index, name='primary_pred')], axis=1)
+                        meta_model = LogisticRegression(max_iter=10000, class_weight='balanced')
+                        meta_model.fit(meta_features, y_meta)
+                        
+                        m_calibrators = {}
+                        m_train_proba = meta_model.predict_proba(meta_features)
+                        m_class_to_index = {c: i for i, c in enumerate(meta_model.classes_)}
+                        for c in meta_model.classes_:
+                            ci = m_class_to_index[c]
+                            y_c = (y_meta == c).astype(int)
+                            m_calibrators[c] = IsotonicCalibrator().fit(m_train_proba[:, ci], y_c)
+                        meta_model = CalibratedModelWrapper(meta_model, m_calibrators, m_class_to_index)
+                    
+                    logger.log("Predictive", "INFO", "Meta-model training & calibration complete")
+                    
+                    # 4.1 Run Sophisticated Backtest on TEST SET
+                    logger.log("Predictive", "INFO", "Step 4.1: Running Backtest on Test Set")
+                    step += 1
+                    p.set(step, message="Running backtest on test set...")
+                    if len(tickers) == 1:
+                        ticker = tickers[0]
+                        full_df = manager.load_data(ticker, interval)
+                        if 'open_time' in full_df.columns:
+                            full_df = full_df.set_index(pd.to_datetime(full_df['open_time']))
+                        
+                        test_df_ohlcv = full_df.reindex(X_test.index)
+                        returns_all = np.log(full_df['close'] / full_df['close'].shift(1))
+                        vol_test = returns_all.rolling(window=input.vol_window()).std().reindex(X_test.index).fillna(0.005)
+                        
+                        if direction == "Long/Short Combine":
+                            def run_test(model_sub, m_model_sub, direction_sub):
+                                p_t_in = model_sub.predict(X_test)
+                                p_t_pb = model_sub.predict_proba(X_test)
+                                c2i_sub = {c: i for i, c in enumerate(model_sub.classes_)}
+                                p_idx = np.array([c2i_sub[c] for c in p_t_in])
+                                p_cnf = p_t_pb[np.arange(len(p_idx)), p_idx]
+                                
+                                p_test_sig = pd.Series([s if c > 0.5 else 0 for s, c in zip(p_t_in, p_cnf)], index=X_test.index)
+                                if direction_sub == "Long Only": p_test_sig = p_test_sig.where(p_test_sig > 0, 0)
+                                if direction_sub == "Short Only": p_test_sig = p_test_sig.where(p_test_sig < 0, 0)
+                                
+                                bt_engine = BacktestEngine(
+                                    tp_multiplier=input.tp_mult_bt(), sl_multiplier=input.sl_mult_bt(),
+                                    min_holding_bar=input.min_holding_bt(), max_holding_bar=input.max_holding_bt(),
+                                    max_positions=input.max_positions()
+                                )
+                                _, r_m, r_eq, _, r_sig, r_sz = bt_engine.run(test_df_ohlcv, p_test_sig, vol_test, pd.Series(1.0, index=X_test.index))
+                                
+                                m_feat = pd.concat([X_test, pd.Series(p_t_in, index=X_test.index, name='primary_pred')], axis=1)
+                                m_probs = m_model_sub.predict_proba(m_feat)
+                                m_preds = m_model_sub.predict(m_feat)
+                                idx_1 = np.where(m_model_sub.classes_ == 1)[0]
+                                m_probs_1 = m_probs[:, idx_1[0]] if len(idx_1) > 0 else np.zeros(len(X_test))
+                                m_sizing = meta_sizing_cal(m_probs_1)
+                                
+                                _, m_m, m_eq, b_h, m_sig, m_sz = bt_engine.run(test_df_ohlcv, p_test_sig, vol_test, pd.Series(m_sizing, index=X_test.index))
+                                
+                                return p_test_sig, m_probs_1, m_preds, r_m, r_eq, r_sig, r_sz, m_m, m_eq, b_h, m_sig, m_sz
+
+                            p_t_sig_l, m_probs_l, m_preds_l, r_m_l, r_eq_l, r_sig_l, r_sz_l, m_m_l, m_eq_l, b_h_l, m_sig_l, m_sz_l = run_test(model.model_long, meta_model.model_long, "Long Only")
+                            p_t_sig_s, m_probs_s, m_preds_s, r_m_s, r_eq_s, r_sig_s, r_sz_s, m_m_s, m_eq_s, b_h_s, m_sig_s, m_sz_s = run_test(model.model_short, meta_model.model_short, "Short Only")
+                            
+                            p_test_signals = p_t_sig_l + p_t_sig_s
+                            y_meta_test = (p_test_signals == y_test).astype(int)
+                            
+                            raw_metrics = {k: (r_m_l.get(k, 0) + r_m_s.get(k, 0)) / 2 for k in set(r_m_l) | set(r_m_s)}
+                            metrics = {k: (m_m_l.get(k, 0) + m_m_s.get(k, 0)) / 2 for k in set(m_m_l) | set(m_m_s)}
+                            
+                            meta_results = {
+                                'raw_metrics': raw_metrics, 'raw_equity': (r_eq_l + r_eq_s) / 2, 'raw_sig': r_sig_l + r_sig_s, 'raw_size': r_sz_l + r_sz_s,
+                                'meta_metrics': metrics, 'meta_equity': (m_eq_l + m_eq_s) / 2, 'meta_sig': m_sig_l + m_sig_s, 'meta_size': m_sz_l + m_sz_s,
+                                'buy_hold_equity': b_h_l,
+                                'meta_probs_long': pd.Series(m_probs_l, index=X_test.index),
+                                'meta_probs_short': pd.Series(m_probs_s, index=X_test.index),
+                                'meta_probs': pd.Series(np.maximum(m_probs_l, m_probs_s), index=X_test.index),
+                                'y_meta_test': pd.Series(y_meta_test, index=X_test.index),
+                                'meta_preds': pd.Series(np.where((m_probs_l > 0.5) | (m_probs_s > 0.5), 1, 0), index=X_test.index)
+                            }
+
+                        else:
+                            # RAW signals backtest
+                            p_test_input = model.predict(X_test)
+                            p_test_signals = pd.Series(p_test_input, index=X_test.index)
+                            p_test_proba = model.predict_proba(X_test)  # shape = (n_samples, n_classes)
+                            
+                            class_to_index = {c: i for i, c in enumerate(model.classes_)}
+                            pred_index = np.array([class_to_index[c] for c in p_test_input])
+                            pred_conf = p_test_proba[np.arange(len(pred_index)), pred_index]
+                            
+                            # Keep signal only if probability > 0.5, else 0 (no trade)
+                            p_test_signals = pd.Series([
+                                sig if conf > 0.5 else 0
+                                for sig, conf in zip(p_test_input, pred_conf)
+                            ], index=X_test.index)
+                            
+                            if direction == "Long Only":
+                                p_test_signals = p_test_signals.where(p_test_signals > 0, 0)
+                            elif direction == "Short Only":
+                                p_test_signals = p_test_signals.where(p_test_signals < 0, 0)
+
+                            bt_engine = BacktestEngine(
+                                tp_multiplier=input.tp_mult_bt(),
+                                sl_multiplier=input.sl_mult_bt(),
+                                min_holding_bar=input.min_holding_bt(),
+                                max_holding_bar=input.max_holding_bt(),
+                                max_positions=input.max_positions()
+                            )
+                            _, raw_metrics, raw_equity, _, raw_sig, raw_size = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(1.0, index=X_test.index))
+                            
+                            # META signals backtest
+                            meta_test_features = pd.concat([X_test, pd.Series(p_test_input, index=X_test.index, name='primary_pred')], axis=1)
+                            meta_probs = meta_model.predict_proba(meta_test_features)
+                            meta_preds = meta_model.predict(meta_test_features)
+                            
+                            y_meta_test = (p_test_signals == y_test).astype(int)
+
+                            idx_1 = np.where(meta_model.classes_ == 1)[0]
+                            if len(idx_1) > 0:
+                                meta_probs = meta_probs[:, idx_1[0]]
+                                meta_sizing = meta_sizing_cal(meta_probs) 
+                            else:
+                                meta_sizing = np.zeros(len(X_test))
+
+                            trade_results, metrics, equity_curve, buy_hold_equity, sig_hist, size_hist = bt_engine.run(test_df_ohlcv, p_test_signals, vol_test, pd.Series(meta_sizing, index=X_test.index))
+                            
+                            meta_results = {
+                                'raw_metrics': raw_metrics,
+                                'raw_equity': raw_equity,
+                                'raw_sig': raw_sig,
+                                'raw_size': raw_size,
+                                'meta_metrics': metrics,
+                                'meta_equity': equity_curve,
+                                'meta_sig': sig_hist,
+                                'meta_size': size_hist,
+                                'buy_hold_equity': buy_hold_equity,
+                                'meta_probs': pd.Series(meta_probs, index=X_test.index),
+                                'y_meta_test': pd.Series(y_meta_test, index=X_test.index) if isinstance(y_meta_test, np.ndarray) else y_meta_test,
+                                'meta_preds': pd.Series(meta_preds, index=X_test.index)
+                            }
+                    else:
+                        # Multi-ticker: Simple "Naive Portfolio" Backtest
+                        # Average returns per timestamp across symbols
+                        p_test = model.predict(X_test)
+                        bt = pd.DataFrame({'Pred': p_test, 'Ret': y_ret_test}, index=X_test.index).sort_index()
+                        
+                        meta_sizing = np.ones(len(bt))
+                        if meta_model is not None:
+                            X_meta = pd.concat([X_test, pd.Series(p_test, index=X_test.index, name='primary_pred')], axis=1)
+                            # Extra safety: unbox for meta model
+                            X_meta = force_scalar_numeric(X_meta)
+                            probs = meta_model.predict_proba(X_meta)
+                            idx_1 = np.where(meta_model.classes_ == 1)[0]
+                            if len(idx_1) > 0:
+                                meta_probs = probs[:, idx_1[0]]
+                                meta_sizing = meta_sizing_cal(meta_probs)
+                        
+                        if is_classification:
+                            bt['Raw'] = np.where(bt['Pred'] == 1, bt['Ret'], 0) + np.where(bt['Pred'] == -1, -bt['Ret'], 0)
+                        else:
+                            bt['Raw'] = np.where(bt['Pred'] > 0, bt['Ret'], 0) + np.where(bt['Pred'] < 0, -bt['Ret'], 0)
+                        
+                        bt['Meta'] = bt['Raw'] * meta_sizing
+                        
+                        def get_bt_stats(series, label, interval):
+                            ret = series.replace([np.inf, -np.inf], 0).fillna(0)
+                            equity = np.exp(ret.cumsum())
+                            total_ret = equity.iloc[-1] - 1
+                            active = ret[ret != 0]
+                            win_rate = (active > 0).sum() / len(active) if len(active) > 0 else 0
+                            ann_factor = MetricsEngine.get_annual_scaling(interval)
+                            
+                            std = ret.std()
+                            sharpe = (ret.mean() / std) * np.sqrt(ann_factor) if std > 1e-12 else 0.0
+                            max_dd = abs(((equity / equity.cummax()) - 1).min())
+                            return {
+                                "total_return": total_ret,
+                                "win_rate": win_rate,
+                                "total_trades": len(active),
+                                "sharpe_ratio": sharpe,
+                                "max_drawdown": max_dd
+                            }, equity
+
+                        raw_m, raw_eq = get_bt_stats(bt['Raw'], "Raw", interval)
+                        meta_m, meta_eq = get_bt_stats(bt['Meta'], "Meta", interval)
+                        bench_m, bench_eq = get_bt_stats(bt['Ret'], "Bench", interval)
+                        
+                        meta_results = {
+                            'raw_metrics': raw_m,
+                            'raw_equity': raw_eq,
+                            'raw_size': bt['Raw'], # approximation
+                            'meta_metrics': meta_m,
+                            'meta_equity': meta_eq,
+                            'meta_size': bt['Meta'], # approximation
+                            'buy_hold_equity': bench_eq,
+                            'meta_probs': pd.Series(meta_probs, index=X_test.index) if 'meta_probs' in locals() else pd.Series(0.5, index=X_test.index)
+                        }
+
+                except Exception as e:
+                    logger.log("Predictive", "WARNING", f"Meta-sizing/Backtest failed: {str(e)}")
+                    import traceback
+                    logger.log("Predictive", "DEBUG", traceback.format_exc())
+                
+                # 4.2 Calculate SHAP Values
+                shap_results = {}
+                try:
+                    logger.log("Predictive", "INFO", "Step 4.2: Calculating SHAP values")
+                    step += 1
+                    p.set(step, message="Calculating SHAP values...")
+                    
+                    direction = input.trade_direction()
+                    
+                    # Primary Model SHAP
+                    if model is not None and direction != "Long/Short Combine":
+                        # Use a sample of test data for SHAP to keep it fast
+                        X_shap_primary = X_test.iloc[-300:] if len(X_test) > 300 else X_test
+                        # Extra safety: aggressively unbox/flatten for SHAP
+                        X_shap_primary = force_scalar_numeric(X_shap_primary)
+                        
+                        # Diagnostic: Check for non-numeric data that might still be present
+                        for col in X_shap_primary.columns:
+                            if not pd.api.types.is_numeric_dtype(X_shap_primary[col]):
+                                logger.log("Predictive", "WARNING", f"Column {col} is NOT numeric! Sample: {X_shap_primary[col].head(2).tolist()}")
+                        
+                        try:
+                            explainer_primary = get_shap_explainer(model, X_shap_primary)
+                            shap_values_primary = explainer_primary(X_shap_primary)
+                            shap_results['primary'] = {
+                                'values': shap_values_primary,
+                                'features': X_test.columns.tolist()
+                            }
+                        except Exception as e:
+                            logger.log("Predictive", "WARNING", f"Primary SHAP failed: {e}")
+                    
+                    # Meta Model SHAP
+                    if meta_model is not None and direction != "Long/Short Combine":
+                        X_shap_meta = meta_test_features.iloc[-300:] if len(meta_test_features) > 300 else meta_test_features
+                        # Extra safety: aggressively unbox/flatten for SHAP
+                        X_shap_meta = force_scalar_numeric(X_shap_meta)
+                        
+                        # Diagnostic: Check for non-numeric data
+                        for col in X_shap_meta.columns:
+                            if not pd.api.types.is_numeric_dtype(X_shap_meta[col]):
+                                logger.log("Predictive", "WARNING", f"Meta column {col} is NOT numeric! Sample: {X_shap_meta[col].head(2).tolist()}")
+                        
+                        try:
+                            explainer_meta = get_shap_explainer(meta_model, X_shap_meta)
+                            shap_values_meta = explainer_meta(X_shap_meta)
+                            shap_results['meta'] = {
+                                'values': shap_values_meta,
+                                'features': meta_test_features.columns.tolist()
+                            }
+                        except Exception as e:
+                            logger.log("Predictive", "WARNING", f"Meta SHAP failed: {e}")
+                    logger.log("Predictive", "INFO", "SHAP calculation complete")
+                except Exception as se:
+                    logger.log("Predictive", "WARNING", f"SHAP calculation failed: {str(se)}")
+
+                # 5. Store Results
+                logger.log("Predictive", "INFO", "Step 5: Storing results")
+                step += 1
+                p.set(step, message="Storing results...")
+                results.set({
+                    'model': model,
+                    'meta_model': meta_model,
+                    'meta_results': meta_results,
+                    'shap_results': shap_results,
+                    'X_train_primary': X_train_primary,
+                    'y_train_primary': y_train_primary,
+                    'y_ret_primary': y_ret_primary,
+                    'X_train_meta': X_train_meta,
+                    'y_train_meta': y_train_meta,
+                    'y_ret_meta': y_ret_meta,
+                    'X_test': X_test,
+                    'y_test': y_test,
+                    'y_ret_test': y_ret_test,
+                    'X_raw': X_raw,
+                    'active_features': active_features,
+                    'is_classification': is_classification,
+                    'reg_type': reg_type,
+                    'l_params': l_params,
+                    'indicator_window': ind_window,
+                    'fwd_window': fwd_window,
+                    'tickers': tickers,
+                    'interval': interval,
+                    'standardize': standardize_flag
+                })
+                ui.notification_show("Analysis complete!", type="success")
+            
         except Exception as e:
-            logger.log("Predictive", "ERROR", f"API Error: {e}")
-            ui.notification_show(f"Connection Error: {e}", type="error")
+            logger.log("Predictive", "ERROR", f"FATAL ERROR in run_analysis: {str(e)}")
+            import traceback
+            logger.log("Predictive", "ERROR", traceback.format_exc())
+            ui.notification_show(f"Analysis failed: {str(e)}", type="error")
 
     @reactive.calc
     def labeling_result():

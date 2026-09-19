@@ -2,9 +2,7 @@ from shiny import ui, render, reactive, session
 import faicons as fa
 import pandas as pd
 from datetime import datetime, timedelta
-from src.data import BinanceFuturesFetcher, DataManager
-from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, DEFAULT_FETCH_INTERVALS
-from src.shared_state import get_manager, get_engine
+from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, DEFAULT_FETCH_INTERVALS, API_BASE_URL
 import asyncio
 import requests
 
@@ -109,9 +107,6 @@ def data_loader_ui():
 
 
 def data_loader_server(input, output, session):
-    fetcher = BinanceFuturesFetcher()
-    manager = get_manager()
-    
     selected_symbols = reactive.Value(set(MANDATORY_CRYPTO))
     logs = reactive.Value([])
     is_fetching = reactive.Value(False)
@@ -122,11 +117,15 @@ def data_loader_server(input, output, session):
     def _():
         with ui.Progress(min=1, max=15) as p:
             p.set(message="Fetching top symbols...", detail="Please wait")
-            new_syms = fetcher.get_top_volume_symbols(top_n=input.top_n())
-            # Ensure MANDATORY_CRYPTO are always included when filtering, but remove IGNORED_CRYPTO
-            combined = set(MANDATORY_CRYPTO).union(new_syms)
-            filtered = {s for s in combined if s not in IGNORED_CRYPTO}
-            selected_symbols.set(filtered)
+            try:
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": input.top_n()})
+                if res.status_code == 200:
+                    new_syms = res.json()["symbols"]
+                    combined = set(MANDATORY_CRYPTO).union(new_syms)
+                    filtered = {s for s in combined if s not in IGNORED_CRYPTO}
+                    selected_symbols.set(filtered)
+            except Exception as e:
+                ui.notification_show(f"Failed to fetch universe: {str(e)}", type="error")
 
     @reactive.effect
     @reactive.event(input.btn_add)
@@ -165,10 +164,9 @@ def data_loader_server(input, output, session):
     @render.ui
     def fetch_progress_ui():
         if is_fetching.get():
-            val = int(progress.get() * 100)
             return ui.div(
                 ui.div(
-                    ui.div(class_="progress-bar", role="progressbar", style=f"width: {val}%;", aria_valuenow=val, aria_valuemin=0, aria_valuemax=100),
+                    ui.div(class_="progress-bar progress-bar-striped progress-bar-animated", role="progressbar", style="width: 100%;"),
                     class_="progress"
                 ),
                 class_="mt-2"
@@ -187,90 +185,43 @@ def data_loader_server(input, output, session):
 
         logs.set([])
         is_fetching.set(True)
-        progress.set(0.0)
 
         all_syms = sorted(list(selected_symbols.get()))
         intervals = input.intervals()
-        total = len(all_syms) * len(intervals)
-        count_done = 0
-        current_logs = []
 
-        for sym in all_syms:
-            for inter in intervals:
-                now_str = datetime.now().strftime('%H:%M:%S')
-                current_logs.append(f"[{now_str}] {sym} {inter}...")
-                logs.set(current_logs[:])
-                
-                try:
-                    first_ts, last_ts = manager.get_cache_range(sym, inter)
+        payload = {
+            "symbols": all_syms,
+            "intervals": list(intervals),
+            "mode": input.fetch_mode(),
+            "days_back": input.days_back(),
+            "limit": input.limit()
+        }
+
+        try:
+            res = requests.post(f"{API_BASE_URL}/data/fetch", json=payload)
+            if res.status_code != 200:
+                ui.notification_show(f"Failed to start fetch: {res.text}", type="error")
+                is_fetching.set(False)
+                return
+        except Exception as e:
+            ui.notification_show(f"Error connecting to API: {str(e)}", type="error")
+            is_fetching.set(False)
+            return
+
+        while True:
+            try:
+                res = requests.get(f"{API_BASE_URL}/data/fetch-status")
+                if res.status_code == 200:
+                    data = res.json()
+                    status_logs = [f"[{log['timestamp']}] {log['message']}" for log in data.get('logs', [])]
+                    logs.set(status_logs)
                     
-                    if input.fetch_mode() == "Range":
-                        end_t = datetime.now()
-                        requested_start = end_t - timedelta(days=input.days_back())
-                        
-                        # Generate UTC naive counterparts for comparison against cache values
-                        end_t_utc = pd.to_datetime(end_t.timestamp(), unit='s')
-                        req_start_utc = pd.to_datetime(requested_start.timestamp(), unit='s')
-                        
-                        dfs_to_fetch = []
-                        
-                        # Case 1: No cache exists -> Full Range
-                        if not first_ts:
-                            df_full = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_t)
-                            if not df_full.empty:
-                                dfs_to_fetch.append(df_full)
-                                mode_info = "Full Range"
-                            else:
-                                mode_info = "No Data"
-                        else:
-                            mode_info = "Incremental"
-                            # Case 2: Forward Gap
-                            if last_ts < end_t_utc - timedelta(minutes=5):
-                                start_ts_ms = int(pd.Timestamp(last_ts).tz_localize('UTC').timestamp() * 1000) + 1
-                                df_fwd = fetcher.fetch_history(sym, inter, start_time=start_ts_ms, end_time=end_t)
-                                if not df_fwd.empty:
-                                    dfs_to_fetch.append(df_fwd)
-                                    mode_info += " (Forward)"
-                            
-                            # Case 3: Backward Gap
-                            if first_ts > req_start_utc + timedelta(minutes=5):
-                                end_ts_ms = int(pd.Timestamp(first_ts).tz_localize('UTC').timestamp() * 1000) - 1
-                                df_bwd = fetcher.fetch_history(sym, inter, start_time=requested_start, end_time=end_ts_ms)
-                                if not df_bwd.empty:
-                                    dfs_to_fetch.append(df_bwd)
-                                    mode_info += " (Backward)"
-
-                        if dfs_to_fetch:
-                            final_df = pd.concat(dfs_to_fetch)
-                            manager.append_data(sym, inter, final_df)
-                            current_logs.append(f"  > {mode_info}: Added {len(final_df)} candles")
-                        else:
-                            current_logs.append(f"  > Up to date")
-                    else:
-                        # Limit mode: Always fetch latest N
-                        df = fetcher.fetch_candles(sym, inter, limit=input.limit())
-                        if not df.empty:
-                            manager.append_data(sym, inter, df)
-                            current_logs.append(f"  > Limit: Synced {len(df)} candles")
-                        else:
-                            current_logs.append(f"  > Up to date / No data")
-                except requests.exceptions.HTTPError as e:
-                    status_code = e.response.status_code
-                    if status_code in [418, 429]:
-                        current_logs.append(f"  ! CRITICAL: Rate Limit reached ({status_code}). Aborting.")
-                        logs.set(current_logs[:])
-                        is_fetching.set(False)
-                        ui.notification_show(f"Aborted: Rate Limit ({status_code})", type="error")
-                        return
-                    current_logs.append(f"  ! HTTP Error {status_code}: {str(e)}")
-                except Exception as e:
-                    current_logs.append(f"  ! Error: {str(e)}")
-
-                count_done += 1
-                progress.set(count_done / total)
-                logs.set(current_logs[:])
-                await asyncio.sleep(0.01)  # Yield to event loop for UI updates
-                await reactive.flush()
+                    if not data.get('in_progress', False):
+                        break
+            except:
+                break
+            await asyncio.sleep(2)
+            await reactive.flush()
 
         is_fetching.set(False)
         ui.notification_show("Data Fetch Complete", type="message")
@@ -297,13 +248,17 @@ def data_loader_server(input, output, session):
         interval = input.delete_interval()
         
         try:
-            count = manager.delete_data(interval)
-            ui.notification_show(f"Successfully deleted {count} files for {interval}", type="message")
-            
-            # Update logs
-            now_str = datetime.now().strftime('%H:%M:%S')
-            current_logs = logs.get()
-            current_logs.append(f"[{now_str}] Deleted {count} files for {interval}")
-            logs.set(current_logs[:])
+            res = requests.delete(f"{API_BASE_URL}/data/cache/{interval}")
+            if res.status_code == 200:
+                count = res.json().get("count", 0)
+                ui.notification_show(f"Successfully deleted {count} files for {interval}", type="message")
+                
+                # Update logs
+                now_str = datetime.now().strftime('%H:%M:%S')
+                current_logs = logs.get()
+                current_logs.append(f"[{now_str}] Deleted {count} files for {interval}")
+                logs.set(current_logs[:])
+            else:
+                ui.notification_show(f"Deletion error: {res.text}", type="error")
         except Exception as e:
             ui.notification_show(f"Deletion error: {str(e)}", type="error")

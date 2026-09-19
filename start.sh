@@ -22,5 +22,13 @@ function cleanup() {
 
 cleanup
 
+echo "Starting Backend API on Port 3000..."
+uvicorn main:app --port 3000 --reload &
+API_PID=$!
+
 echo "Starting Crypto Filter Shiny App on Port 8000..."
 python -m shiny run app.py --reload --port 8000 --launch-browser
+
+# Cleanup background process when Shiny exits
+kill $API_PID
+wait $API_PID 2>/dev/null

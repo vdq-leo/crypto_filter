@@ -22,10 +22,7 @@ from modules.multivariate_analysis import multivariate_analysis_ui, multivariate
 from modules.activity_logs import activity_logs_ui, activity_logs_server
 from modules.symbol_diagnostics import symbol_diagnostics_ui, symbol_diagnostics_server
 from modules.pair_radar import pair_radar_ui, pair_radar_server
-from src.data import DataManager
-from src.metrics import MetricsEngine
-from src.config import BENCHMARK_SYMBOL
-from src.shared_state import get_manager, get_engine
+from src.config import BENCHMARK_SYMBOL, API_BASE_URL
 from datetime import datetime, timedelta
 
 # UI definition
@@ -132,30 +129,41 @@ app_ui = ui.page_navbar(
 def server(input, output, session):
     # Shared global state if needed
     global_interval = reactive.Value("1h")
-    manager = get_manager()
-    engine = get_engine()
     
     diag_data = reactive.Value({})
     data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"}})
     
     def get_timestamps(symbol, interval):
-        # Disable auto_sync for metadata checks to prevent startup data fetching
-        df = manager.load_data(symbol, interval, auto_sync=False)
-        if df is not None and not df.empty and 'open_time' in df.columns:
-            ts = pd.to_datetime(df['open_time'])
-            return {"oldest": str(ts.min()), "latest": str(ts.max())}
+        try:
+            res = requests.get(f"{API_BASE_URL}/data/klines", params={"symbol": symbol, "interval": interval, "limit": 10000})
+            if res.status_code == 200:
+                data = res.json().get("candles", [])
+                if data:
+                    oldest = pd.to_datetime(data[0]["time"], unit='s')
+                    latest = pd.to_datetime(data[-1]["time"], unit='s')
+                    return {"oldest": str(oldest), "latest": str(latest)}
+        except:
+            pass
         return {"oldest": "-", "latest": "-"}
     
     @reactive.Effect
     def populate_symbols():
         with ui.Progress(min=0, max=1) as p:
             p.set(0, message="Initializing Market Data...")
-            all_syms = manager.get_universe()
+            try:
+                res = requests.get(f"{API_BASE_URL}/data/universe")
+                all_syms = res.json()["symbols"] if res.status_code == 200 else []
+            except:
+                all_syms = []
             p.set(1, message="Populating Global Selectors...")
             ui.update_selectize("quick_symbol", choices=all_syms, server=True)
 
         # Set benchmark/global timestamps once
-        global_ts = get_timestamps(BENCHMARK_SYMBOL, input.diag_interval())
+        try:
+            interval_val = input.diag_interval()
+        except:
+            interval_val = "1h"
+        global_ts = get_timestamps(BENCHMARK_SYMBOL, interval_val)
         data_info.set({"global": global_ts})
     
     @render.ui

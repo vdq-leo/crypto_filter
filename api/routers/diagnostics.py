@@ -12,7 +12,10 @@ from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL, MANDATORY_CRYPTO, IGNORED_CRYPTO
 from src.shared_state import get_manager, get_engine
 from ml_engine.analysis.multivariate import DecompositionEngine
-
+from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
+from ml_engine.labeling.labeler import Labeler
+from scipy.stats import skew, kurtosis
+from concurrent.futures import ThreadPoolExecutor
 router = APIRouter()
 manager = get_manager()
 engine = get_engine()
@@ -195,6 +198,63 @@ def run_diagnostics(req: DiagnosticsRequest):
         except Exception as e:
             ohlcv = []
 
+        # 6. Regime Classification
+        curr_regime = "Sideways/Neutral"
+        try:
+            l_algo = Labeler(amplitude_threshold=0.01, max_inactive_period=10)
+            lbl_df = l_algo.label(prices[-req.diag_window:])
+            curr_lbl_val = lbl_df['label'].iloc[-1]
+            if curr_lbl_val == 1: curr_regime = "Uptrend"
+            elif curr_lbl_val == -1: curr_regime = "Downtrend"
+            
+            lbl_status = curr_regime
+            lbl_labels = lbl_df['label'].tolist()
+            lbl_prices = lbl_df['price'].tolist()
+        except:
+            lbl_status = "Unknown"
+            lbl_labels = []
+            lbl_prices = []
+
+        # 7. ADL Risk
+        try:
+            adl_risk_map = manager.fetcher.get_all_adl_risks()
+            current_adl_risk = adl_risk_map.get(req.symbol, 0)
+        except:
+            current_adl_risk = 0
+
+        # 8. Binance Trading Stats
+        period_mapping = {
+            '1m': '5m', '3m': '5m', '5m': '5m', '15m': '15m',
+            '30m': '30m', '1h': '1h', '2h': '2h', '4h': '4h',
+            '6h': '6h', '8h': '6h', '12h': '12h', '1d': '1d',
+            '3d': '1d', '1w': '1d', '1M': '1d'
+        }
+        period = period_mapping.get(req.interval, '1h')
+        limit = min(req.diag_window, 500)
+        
+        try:
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                f_oi = executor.submit(manager.fetcher.get_historical_stats_series, req.symbol, period, manager.fetcher.OPEN_INTEREST_HIST, limit=limit)
+                f_pos = executor.submit(manager.fetcher.get_historical_stats_series, req.symbol, period, manager.fetcher.TOP_LS_POSITION, limit=limit)
+                f_acc = executor.submit(manager.fetcher.get_historical_stats_series, req.symbol, period, manager.fetcher.TOP_LS_ACCOUNT, limit=limit)
+                f_g_acc = executor.submit(manager.fetcher.get_historical_stats_series, req.symbol, period, manager.fetcher.GLOBAL_LS_ACCOUNT, limit=limit)
+                f_taker = executor.submit(manager.fetcher.get_historical_stats_series, req.symbol, period, manager.fetcher.TAKER_BUY_SELL, limit=limit)
+                f_fund = executor.submit(manager.fetcher.get_historical_funding_rate, req.symbol, limit=limit)
+                
+                oi_hist = f_oi.result()
+                top_pos = f_pos.result()
+                top_acc = f_acc.result()
+                glob_acc = f_g_acc.result()
+                taker_ratio = f_taker.result()
+                fund_hist = f_fund.result()
+        except:
+            oi_hist = []
+            top_pos = []
+            top_acc = []
+            glob_acc = []
+            taker_ratio = []
+            fund_hist = []
+
         def np_safe(v):
             return None if pd.isna(v) or np.isinf(v) else float(v)
 
@@ -210,7 +270,8 @@ def run_diagnostics(req: DiagnosticsRequest):
                 "beta": np_safe(beta_),
                 "alpha": np_safe(alpha_),
                 "impact_spread": np_safe(book_status.get("impact_spread", 0)),
-                "imbalance": np_safe(book_status.get("orderbook_imbalance", 0))                
+                "imbalance": np_safe(book_status.get("orderbook_imbalance", 0)),
+                "adl_risk": current_adl_risk
             },
             "charts": {
                 "metrics": metrics_list,
@@ -225,8 +286,86 @@ def run_diagnostics(req: DiagnosticsRequest):
                     "hist": hist_vol,
                     "forecast": fc_vol
                 },
+                "regime": {
+                    "status": lbl_status,
+                    "labels": lbl_labels,
+                    "prices": lbl_prices
+                },
+                "ts_oi": oi_hist,
+                "ts_top_pos": top_pos,
+                "ts_top_acc": top_acc,
+                "ts_glob_acc": glob_acc,
+                "ts_taker": taker_ratio,
+                "ts_fund": fund_hist,
                 "ohlcv": ohlcv
             }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class BarsRequest(BaseModel):
+    symbol: str
+    interval: str
+    vol_th: float
+    dollar_th: float
+
+@router.post("/bars")
+def generate_bars(req: BarsRequest):
+    try:
+        df = manager.load_data(req.symbol, req.interval, auto_sync=False)
+        if df is None or df.empty:
+            raise HTTPException(status_code=400, detail="No data available")
+        
+        if 'open_time' in df.columns:
+            df = df.set_index(pd.to_datetime(df['open_time']))
+            
+        time_df = df.copy()
+        time_df['ret'] = np.log(time_df['close'] / time_df['close'].shift(1))
+        
+        vol_df = construct_volume_bars(df, req.vol_th)
+        if not vol_df.empty:
+            vol_df['ret'] = np.log(vol_df['close'] / vol_df['close'].shift(1))
+            
+        dollar_df = construct_dollar_bars(df, req.dollar_th)
+        if not dollar_df.empty:
+            dollar_df['ret'] = np.log(dollar_df['close'] / dollar_df['close'].shift(1))
+            
+        res = {}
+        for name, d in [("time", time_df), ("volume", vol_df), ("dollar", dollar_df)]:
+            if d is not None and not d.empty:
+                d = d.replace([np.inf, -np.inf], None).where(pd.notnull(d), None)
+                res[name] = {
+                    "data": d.reset_index().to_dict(orient="records"),
+                    "stats": {
+                        "count": len(d),
+                        "skew": skew(d['ret'].dropna()) if len(d['ret'].dropna()) > 1 else 0,
+                        "kurtosis": kurtosis(d['ret'].dropna(), fisher=True) if len(d['ret'].dropna()) > 1 else 0
+                    }
+                }
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class CalibrateRequest(BaseModel):
+    symbol: str
+    interval: str
+
+@router.post("/calibrate-bars")
+def calibrate_bars(req: CalibrateRequest):
+    try:
+        df = manager.load_data(req.symbol, req.interval, auto_sync=False)
+        if df is None or df.empty:
+            raise HTTPException(status_code=400, detail="No data available")
+        
+        if 'open_time' in df.columns:
+            df = df.set_index(pd.to_datetime(df['open_time']))
+            
+        opt_vol = calibrate_bar_threshold(df, "Volume Bars")
+        opt_dollar = calibrate_bar_threshold(df, "Dollar Bars")
+        
+        return {
+            "vol_th": opt_vol,
+            "dollar_th": opt_dollar
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -14,6 +14,9 @@ if not exist .venv (
     call .venv\Scripts\activate
 )
 
+echo Starting Backend API on Port 3000...
+start /b uvicorn main:app --port 3000
+
 echo Starting Crypto Filter Shiny App on Port 8000...
 python -m shiny run app.py --reload --port 8000 --launch-browser
 pause

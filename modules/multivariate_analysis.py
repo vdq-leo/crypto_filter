@@ -9,8 +9,9 @@ import plotly.figure_factory as ff
 from src.data import DataManager
 from ml_engine.analysis.multivariate import MatrixEngine, DecompositionEngine
 from scipy.cluster.hierarchy import linkage
-from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO
+from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
 from src.shared_state import get_manager, get_engine
+from src.logger import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
@@ -445,77 +446,37 @@ def multivariate_analysis_server(input, output, session):
             dsource = input.data_source() if structure != "Arbitrage" else "price"
             dstruct = input.data_structure() if structure != "Arbitrage" else "raw"
 
-            if structure == "Correlation":
-                # Load price data and let MatrixEngine handle transformations
-                data_map = _load_price_data(symbols, interval, p)
-                if not data_map: return
-                raw_matrix = MatrixEngine.calculate_matrix(
-                    data_map,
-                    method=input.corr_method(),
-                    window_size=input.window_size(),
-                    data_source=dsource,
-                    data_structure=dstruct
-                )
-            elif structure == "Covariance":
-                data_map = _load_price_data(symbols, interval, p)
-                if not data_map: return
-                raw_matrix = MatrixEngine.calculate_covariance(
-                    data_map,
-                    window_size=input.window_size(),
-                    data_source=dsource,
-                    data_structure=dstruct
-                )
-            elif structure == "Partial Correlation":
-                data_map = _load_price_data(symbols, interval, p)
-                if not data_map: return
-                raw_matrix = MatrixEngine.calculate_partial_correlation(
-                    data_map,
-                    window_size=input.window_size(),
-                    data_source=dsource,
-                    data_structure=dstruct
-                )
-            elif structure == "Arbitrage":
-                method = input.arb_method()
-                if method == "cointegration":
-                    price = _load_price_data(symbols, interval, p)
-                    if not price: return
-                    price_df = pd.DataFrame(price)
-                    raw_matrix = MatrixEngine.calculate_coint_matrix(
-                        price_df,
-                        window_size=input.window_size()
-                    )
-                elif method == "zscore":
-                    price = _load_price_data(symbols, interval, p)
-                    if not price: return
-                    raw_matrix = MatrixEngine.calculate_zscore_matrix(
-                        price,
-                        window_size=input.window_size()
-                    )
-                elif method == "halflife":
-                    price = _load_price_data(symbols, interval, p)
-                    if not price: return
-                    raw_matrix = MatrixEngine.calculate_halflife_matrix(
-                        price,
-                        window_size=input.window_size()
-                    )
-                elif method == "vol_ratio":
-                    price = _load_price_data(symbols, interval, p)
-                    if not price: return
-                    raw_matrix = MatrixEngine.calculate_vol_ratio_matrix(
-                        price,
-                        window_size=input.window_size()
-                    )
-                elif method == "arbitrage_score":
-                    price = _load_price_data(symbols, interval, p)
-                    if not price: return
-                    raw_matrix = MatrixEngine.calculate_arbitrage_score_matrix(
-                        price,
-                        window_size=input.window_size(),
-                        mean_reversion=input.mean_reversion()
-                    )
-                else:
-                    return
+            payload = {
+                "symbols": symbols,
+                "interval": interval,
+                "structure": structure,
+                "data_source": dsource,
+                "data_structure": dstruct,
+                "window": input.window_size()
+            }
+            if structure == "Arbitrage":
+                payload["method"] = input.arb_method()
+                if input.arb_method() == "arbitrage_score":
+                    payload["mean_reversion"] = input.mean_reversion()
+            elif structure == "Correlation":
+                payload["method"] = input.corr_method()
             else:
+                payload["method"] = "pearson"
+                
+            try:
+                res = requests.post(f"{API_BASE_URL}/multivariate/matrix", json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    cols = data.get("columns", [])
+                    idx = data.get("index", [])
+                    mat_data = data.get("data", [])
+                    raw_matrix = pd.DataFrame(mat_data, columns=cols, index=idx)
+                else:
+                    ui.notification_show(f"Calculation error: {res.text}", type="error")
+                    return
+            except Exception as e:
+                logger.log("Multivariate", "ERROR", f"API Connection error: {e}")
+                ui.notification_show(f"API Connection error: {str(e)}", type="error")
                 return
 
             filtered_matrix, _ = MatrixEngine.filter_blanks(raw_matrix)
@@ -772,83 +733,48 @@ def multivariate_analysis_server(input, output, session):
             dsource = input.decomp_data_source()
             dstruct = input.decomp_data_structure()
 
-            data_map = _load_price_data(symbols, interval, p)
-            # Build correlation matrix as base for most methods
-            
-            # Use aligned data for calculations
-            corr = MatrixEngine.calculate_matrix(
-                data_map, 
-                method="pearson", 
-                window_size=window,
-                data_source=dsource,
-                data_structure=dstruct
-            )
-            corr_clean, _ = MatrixEngine.filter_blanks(corr)
-
-            step = 20
-            step += 1
-            p.set(step, message=f"Running {method}...")
-
-            # Store aligned data for decomposition engines
-            # We first align symbols from corr_clean
-            aligned_price_map = {s: data_map[s] for s in corr_clean.columns if s in data_map}
-            wide_df_raw = pd.DataFrame(aligned_price_map).iloc[-window:].dropna()
-            
-            # Transform data for decomposition
-            wide_df = MatrixEngine._prepare_data(wide_df_raw, data_source=dsource, data_structure=dstruct)
-            
-            if wide_df.empty:
-                ui.notification_show("Not enough aligned data for decomposition", type="warning")
-                return
-
-            T = len(wide_df)
-            N = len(wide_df.columns)
-
-            result = {
-                'method': method,
-                'returns': wide_df
+            payload = {
+                "symbols": symbols,
+                "interval": interval,
+                "method": method,
+                "data_source": dsource,
+                "data_structure": dstruct,
+                "window": window,
+                "n_components": input.n_components(),
+                "linkage_method": input.linkage_method(),
+                "matrix_structure": input.dependence_structure(),
+                "matrix_method": input.corr_method(),
+                "k_factor_mode": input.k_factor_mode(),
+                "spillover_type": input.spillover_type()
             }
+            
+            try:
+                res_api = requests.post(f"{API_BASE_URL}/multivariate/decomposition", json=payload)
+                if res_api.status_code == 200:
+                    data = res_api.json()
+                    
+                    def restore_df(obj):
+                        if isinstance(obj, dict) and "columns" in obj and "index" in obj and "data" in obj:
+                            return pd.DataFrame(obj["data"], columns=obj["columns"], index=obj["index"])
+                        if isinstance(obj, dict) and "index" in obj and "data" in obj:
+                            return pd.Series(obj["data"], index=obj["index"])
+                        if isinstance(obj, dict):
+                            return {k: restore_df(v) for k, v in obj.items()}
+                        if isinstance(obj, list):
+                            return [restore_df(v) for v in obj]
+                        return obj
 
-            if method == "eigen":
-                k = input.n_components()
-                result['data'] = DecompositionEngine.pca_decompose(wide_df, n_components=k)
-                result['data']['mode'] = "Standard" # For card title compatibility
-
-            elif method == "rmt":
-                result['data'] = DecompositionEngine.spectral_filter_rmt(corr_clean, T, N)
-
-            elif method == "kfactor":
-                # k is now ignored by k_factor_decompose in favor of automated PC1 logic
-                result['data'] = DecompositionEngine.k_factor_decompose(
-                    wide_df, 0, mode=input.k_factor_mode()
-                )
-
-            elif method == "ica":
-                n_comp = min(input.n_components(), N, T)
-                result['data'] = DecompositionEngine.ica_decompose(wide_df, n_components=n_comp)
-
-            elif method == "distance":
-                result['data'] = DecompositionEngine.distance_matrix(corr_clean)
-
-            elif method == "cluster":
-                dist = DecompositionEngine.distance_matrix(corr_clean)
-                result['data'] = DecompositionEngine.hierarchical_cluster(dist, method=input.linkage_method())
-                result['dist'] = dist
-
-            elif method == "mst":
-                # dist = DecompositionEngine.distance_matrix(corr_clean)
-                # result['data'] = DecompositionEngine.mst_spillover(dist)
-                s_type = input.spillover_type()
-                if s_type == "volatility":
-                    vol = wide_df.ewm(span=window, adjust=False).std().dropna()
-                    result['data'] = DecompositionEngine.vol_spillover(vol)
+                    result = restore_df(data)
+                    
+                    p.set(100, message="Done")
+                    decomp_result.set(result)
                 else:
-                    result['data'] = DecompositionEngine.return_spillover(wide_df)
-                result['spillover_type'] = s_type
-
-            result['corr'] = corr_clean
-            p.set(100, message="Done")
-            decomp_result.set(result)
+                    ui.notification_show(f"Calculation error: {res_api.text}", type="error")
+                    return
+            except Exception as e:
+                logger.log("Multivariate", "ERROR", f"API Connection error: {e}")
+                ui.notification_show(f"API Connection error: {str(e)}", type="error")
+                return
 
     @render.ui
     def decomp_view():
