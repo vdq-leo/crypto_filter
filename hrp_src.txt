@@ -1,0 +1,107 @@
+    def _recursive_bisection(
+        self,
+        sort_order,
+        rm="MV",
+        rf=0,
+        upper_bound=None,
+        lower_bound=None,
+    ):
+        weights = pd.Series(1.0, index=self.assetslist)  # set initial weights to 1
+        items = [sort_order]
+
+        while len(items) > 0:  # loop while weights is under 100%
+            items = [
+                i[j:k]
+                for i in items
+                for j, k in (
+                    (0, len(i) // 2),
+                    (len(i) // 2, len(i)),
+                )  # get cluster indices
+                if len(i) > 1
+            ]
+
+            # allocate weight to left and right cluster
+            for i in range(0, len(items), 2):
+                left_cluster = items[i]
+                right_cluster = items[i + 1]
+
+                # Left cluster
+                left_cov = self.cov.iloc[left_cluster, left_cluster]
+                left_returns = self.returns.iloc[:, left_cluster]
+                left_weights = self._naive_risk(left_returns, left_cov, rm=rm, rf=rf)
+
+                if rm == "vol":
+                    left_risk = rk.Sharpe_Risk(
+                        returns=left_returns,
+                        w=left_weights,
+                        cov=left_cov,
+                        rm="MV",
+                        rf=rf,
+                        alpha=self.alpha,
+                        a_sim=self.a_sim,
+                        beta=self.beta,
+                        b_sim=self.b_sim,
+                        kappa=self.kappa,
+                        solver=self.solver_rl,
+                    )
+                else:
+                    left_risk = rk.Sharpe_Risk(
+                        returns=left_returns,
+                        w=left_weights,
+                        cov=left_cov,
+                        rm=rm,
+                        rf=rf,
+                        alpha=self.alpha,
+                        a_sim=self.a_sim,
+                        beta=self.beta,
+                        b_sim=self.b_sim,
+                        kappa=self.kappa,
+                        solver=self.solver_rl,
+                    )
+                    if rm == "MV":
+                        left_risk = np.power(left_risk, 2)
+
+                # Right cluster
+                right_cov = self.cov.iloc[right_cluster, right_cluster]
+                right_returns = self.returns.iloc[:, right_cluster]
+                right_weights = self._naive_risk(right_returns, right_cov, rm=rm, rf=rf)
+
+                if rm == "vol":
+                    right_risk = rk.Sharpe_Risk(
+                        returns=right_returns,
+                        w=right_weights,
+                        cov=right_cov,
+                        rm="MV",
+                        rf=rf,
+                        alpha=self.alpha,
+                        a_sim=self.a_sim,
+                        beta=self.beta,
+                        b_sim=self.b_sim,
+                        kappa=self.kappa,
+                        solver=self.solver_rl,
+                    )
+                else:
+                    right_risk = rk.Sharpe_Risk(
+                        returns=right_returns,
+                        w=right_weights,
+                        cov=right_cov,
+                        rm=rm,
+                        rf=rf,
+                        alpha=self.alpha,
+                        a_sim=self.a_sim,
+                        beta=self.beta,
+                        b_sim=self.b_sim,
+                        kappa=self.kappa,
+                        solver=self.solver_rl,
+                    )
+                    if rm == "MV":
+                        right_risk = np.power(right_risk, 2)
+
+                # Allocate weight to clusters
+                alpha_1 = 1 - left_risk / (left_risk + right_risk)
+
+                weights.iloc[left_cluster] *= alpha_1  # weight 1
+                weights.iloc[right_cluster] *= 1 - alpha_1  # weight 2
+
+        return weights
+

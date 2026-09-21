@@ -54,8 +54,7 @@ def portfolio_allocation_ui():
                     ui.input_select(
                         "pa_opt_method", 
                         "Objective", 
-                        choices={"max_sharpe": "Max Sharpe", "min_variance": "Min Variance", "risk_parity": "Risk Parity", "herc": "HERC", "hrp": "HRP"},
-                        selected="max_sharpe"
+                        choices={"max_sharpe": "Max Sharpe", "min_variance": "Min Variance", "risk_parity": "Risk Parity", "herc": "HERC", "hrp": "HRP", "nco": "NCO"},
                     ),
                     ui.input_numeric("pa_total_value", "Total Portfolio Value (USDT)", value=10000.0, min=0.0, step=1000.0),
                     ui.input_numeric("pa_risk_free", "Risk-Free Rate (Annual %)", value=0.0, step=1.0),
@@ -171,6 +170,8 @@ def portfolio_allocation_server(input, output, session):
             mdd = metrics['expected_maxdd']
             n_obs = metrics.get('n_obs', 0)
             
+            sharpe = er / vol if vol > 1e-8 else 0.0
+            
             # Using raw HTML inputs for editing, tied to reactive updates via JS or just read at optimize time.
             # For simplicity in V1, we'll display a static table and allow sliders/inputs if we wanted, 
             # but to make it truly editable we can use ui.input_numeric in a loop.
@@ -179,6 +180,7 @@ def portfolio_allocation_server(input, output, session):
                 ui.tags.td(sym, class_="fw-bold"),
                 ui.tags.td(ui.input_numeric(f"er_{sym}", "", value=round(er, 6), step=0.001, width="100px")),
                 ui.tags.td(ui.input_numeric(f"vol_{sym}", "", value=round(vol, 6), step=0.001, min=0.0, width="100px")),
+                ui.tags.td(f"{sharpe:.4f}", id=f"sharpe_{sym}"),
                 ui.tags.td(f"{mdd:.4f}"),
                 ui.tags.td(str(n_obs))
             )
@@ -190,6 +192,7 @@ def portfolio_allocation_server(input, output, session):
                     ui.tags.th("Asset"),
                     ui.tags.th("Exp. Return (Annualized)"),
                     ui.tags.th("Exp. Volatility (Annualized)"),
+                    ui.tags.th("Sharpe Ratio"),
                     ui.tags.th("Exp. Max DD (Diag)"),
                     ui.tags.th("Observations")
                 )
@@ -198,7 +201,28 @@ def portfolio_allocation_server(input, output, session):
             class_="table table-dark table-hover table-sm align-middle",
             style="table-layout: fixed; width: 100%;"
         )
-        return table
+        
+        script = ui.tags.script("""
+            setTimeout(() => {
+                document.querySelectorAll('input[type="number"]').forEach(input => {
+                    if (input.id.startsWith('er_') || input.id.startsWith('vol_')) {
+                        input.addEventListener('input', function() {
+                            const sym = this.id.split('_').slice(1).join('_');
+                            const er = parseFloat(document.getElementById('er_' + sym).value);
+                            const vol = parseFloat(document.getElementById('vol_' + sym).value);
+                            const sharpeTd = document.getElementById('sharpe_' + sym);
+                            if (sharpeTd && !isNaN(er) && !isNaN(vol) && vol > 1e-8) {
+                                sharpeTd.innerText = (er / vol).toFixed(4);
+                            } else if (sharpeTd) {
+                                sharpeTd.innerText = "0.0000";
+                            }
+                        });
+                    }
+                });
+            }, 100);
+        """)
+        
+        return ui.TagList(table, script)
         
     @render.table
     def pa_validation_metrics():
@@ -214,10 +238,10 @@ def portfolio_allocation_server(input, output, session):
             rows.append({
                 "Asset": sym,
                 "Model": "Return",
-                "R2": r_val['r2'],
-                "RMSE": r_val['rmse'],
-                "MAE": r_val['mae'],
-                "IC": r_val['ic']
+                "OOS R2": r_val.get('oos_r2', 0.0),
+                "RMSE": r_val.get('rmse', 0.0),
+                "Dir. Acc.": r_val.get('da', 0.0),
+                "Rank IC": r_val.get('rank_ic', 0.0)
             })
             
         df = pd.DataFrame(rows)
@@ -462,9 +486,13 @@ def portfolio_allocation_server(input, output, session):
             title="Efficient Frontier",
             xaxis_title="Expected Volatility",
             yaxis_title="Expected Return",
-            template="plotly_dark",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
             margin=dict(l=40, r=40, t=40, b=40)
         )
+        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
+        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.3)")
         return fig
         
     @render_widget
@@ -488,9 +516,15 @@ def portfolio_allocation_server(input, output, session):
             hole=0.4
         )])
         
+        tv = data.get('target_volatility', data.get('metrics', {}).get('target_volatility', 0))
+        if tv <= 1.0:
+            tv = tv * 100.0
+            
         fig.update_layout(
-            title=f"Allocation (Target Vol: {data['metrics']['target_volatility']*100:.1f}%)",
-            template="plotly_dark",
+            title=f"Allocation (Target Vol: {tv:.1f}%)",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            font=dict(family="Space Mono", color="white"),
             margin=dict(l=20, r=20, t=40, b=20),
             showlegend=False
         )
@@ -521,9 +555,12 @@ def portfolio_allocation_server(input, output, session):
                 
             base_er = est_data['assets'][sym]['expected_return'] if est_data else 0.0
             base_vol = est_data['assets'][sym]['expected_volatility'] if est_data else 0.0
+            latest_price = est_data['assets'][sym].get('latest_price', 1.0) if est_data else 1.0
             
             er = float(er_val) if er_val is not None else base_er
             vol = float(vol_val) if vol_val is not None else base_vol
+            
+            alloc_usdt = final_w[sym] * total_val
             
             rows.append({
                 "Asset": sym,
@@ -531,7 +568,8 @@ def portfolio_allocation_server(input, output, session):
                 "Exp. Volatility": vol,
                 "Relative Weight": rel_w[sym],
                 "Final Weight": final_w[sym],
-                "Allocation (USDT)": final_w[sym] * total_val,
+                "Allocation (USDT)": alloc_usdt,
+                "Quantity": alloc_usdt / latest_price if latest_price > 0 else 0.0,
                 "Risk Contribution": rc.get(sym, 0.0)
             })
             
@@ -549,6 +587,7 @@ def portfolio_allocation_server(input, output, session):
                 "Relative Weight": 0.0,
                 "Final Weight": cash_weight,
                 "Allocation (USDT)": cash_weight * total_val,
+                "Quantity": cash_weight * total_val,
                 "Risk Contribution": 0.0
             })
             
@@ -566,6 +605,7 @@ def portfolio_allocation_server(input, output, session):
             "Relative Weight": sum(rel_w.values()),
             "Final Weight": sum_final + cash_weight,
             "Allocation (USDT)": total_val,
+            "Quantity": float('nan'),
             "Risk Contribution": sum(rc.values())
         })
             
@@ -581,7 +621,15 @@ def portfolio_allocation_server(input, output, session):
         styled = (df.style
             .hide(axis="index")
             .apply(highlight_total, axis=1)
-            .format(precision=4)
+            .format({
+                "Exp. Return": "{:.2%}",
+                "Exp. Volatility": "{:.2%}",
+                "Relative Weight": "{:.2%}",
+                "Final Weight": "{:.2%}",
+                "Allocation (USDT)": "${:,.2f}",
+                "Quantity": "{:,.4f}",
+                "Risk Contribution": "{:.2%}"
+            }, na_rep="")
             .set_table_attributes('class="table table-dark table-hover table-sm align-middle" style="table-layout: fixed; width: 100%;"')
         )
         return styled

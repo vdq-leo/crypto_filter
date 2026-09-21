@@ -358,6 +358,26 @@ input:focus {
     outline: none !important;
 }
 
+/* ===== Custom Checkbox (since appearance is none) ===== */
+input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    position: relative;
+    display: inline-block;
+}
+
+input[type="checkbox"]:checked::after {
+    content: "X"; /* Terminal style check */
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--primary-orange);
+    font-weight: bold;
+    font-size: 14px;
+}
+
 /* Labels */
 .form-check-label {
     color: var(--text-white) !important;

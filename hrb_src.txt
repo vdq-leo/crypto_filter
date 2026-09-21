@@ -1,0 +1,161 @@
+    def _hierarchical_recursive_bisection(
+        self,
+        Z,
+        rm="MV",
+        rf=0,
+        model="HERC",
+    ):
+        # Transform linkage to tree and reverse order
+        root, nodes = hr.to_tree(Z, rd=True)
+        nodes = np.array(nodes)
+        nodes_1 = np.array([i.dist for i in nodes])
+        idx = np.argsort(nodes_1)
+        nodes = nodes[idx][::-1].tolist()
+        weights = pd.Series(1.0, index=self.assetslist)  # Set initial weights to 1
+
+        clustering_inds = hr.fcluster(Z, self.k, criterion="maxclust")
+        clusters = {
+            i: [] for i in range(min(clustering_inds), max(clustering_inds) + 1)
+        }
+        for i, v in enumerate(clustering_inds):
+            clusters[v].append(i)
+
+        # Loop through k clusters
+        for i in nodes[: self.k - 1]:
+            if i.is_leaf() == False:  # skip leaf-nodes
+                left = i.get_left().pre_order()  # lambda i: i.id) # get left cluster
+                right = i.get_right().pre_order()  # lambda i: i.id) # get right cluster
+                left_set = set(left)
+                right_set = set(right)
+                left_risk = 0
+                right_risk = 0
+                left_cluster = []
+                right_cluster = []
+
+                # Allocate weight to clusters
+                if rm == "equal":
+                    alpha_1 = 0.5
+
+                else:
+                    for j in clusters.keys():
+                        if set(clusters[j]).issubset(left_set):
+                            # Left cluster
+                            left_cov = self.cov.iloc[clusters[j], clusters[j]]
+                            left_returns = self.returns.iloc[:, clusters[j]]
+                            left_weights = self._naive_risk(
+                                left_returns, left_cov, rm=rm, rf=rf
+                            )
+
+                            if rm == "vol":
+                                left_risk_ = rk.Sharpe_Risk(
+                                    returns=left_returns,
+                                    w=left_weights,
+                                    cov=left_cov,
+                                    rm="MV",
+                                    rf=rf,
+                                    alpha=self.alpha,
+                                    a_sim=self.a_sim,
+                                    beta=self.beta,
+                                    b_sim=self.b_sim,
+                                    kappa=self.kappa,
+                                    kappa_g=self.kappa_g,
+                                    solver=self.solver_rl,
+                                )
+                            else:
+                                left_risk_ = rk.Sharpe_Risk(
+                                    returns=left_returns,
+                                    w=left_weights,
+                                    cov=left_cov,
+                                    rm=rm,
+                                    rf=rf,
+                                    alpha=self.alpha,
+                                    a_sim=self.a_sim,
+                                    beta=self.beta,
+                                    b_sim=self.b_sim,
+                                    kappa=self.kappa,
+                                    kappa_g=self.kappa_g,
+                                    solver=self.solver_rl,
+                                )
+                                if rm == "MV":
+                                    left_risk_ = np.power(left_risk_, 2)
+
+                            left_risk += left_risk_
+                            left_cluster += clusters[j]
+
+                        elif set(clusters[j]).issubset(right_set):
+                            # Right cluster
+                            right_cov = self.cov.iloc[clusters[j], clusters[j]]
+                            right_returns = self.returns.iloc[:, clusters[j]]
+                            right_weights = self._naive_risk(
+                                right_returns, right_cov, rm=rm, rf=rf
+                            )
+
+                            if rm == "vol":
+                                right_risk_ = rk.Sharpe_Risk(
+                                    returns=right_returns,
+                                    w=right_weights,
+                                    cov=right_cov,
+                                    rm="MV",
+                                    rf=rf,
+                                    alpha=self.alpha,
+                                    a_sim=self.a_sim,
+                                    beta=self.beta,
+                                    b_sim=self.b_sim,
+                                    kappa=self.kappa,
+                                    kappa_g=self.kappa_g,
+                                    solver=self.solver_rl,
+                                )
+                            else:
+                                right_risk_ = rk.Sharpe_Risk(
+                                    returns=right_returns,
+                                    w=right_weights,
+                                    cov=right_cov,
+                                    rm=rm,
+                                    rf=rf,
+                                    alpha=self.alpha,
+                                    a_sim=self.a_sim,
+                                    beta=self.beta,
+                                    b_sim=self.b_sim,
+                                    kappa=self.kappa,
+                                    kappa_g=self.kappa_g,
+                                    solver=self.solver_rl,
+                                )
+                                if rm == "MV":
+                                    right_risk_ = np.power(right_risk_, 2)
+
+                            right_risk += right_risk_
+                            right_cluster += clusters[j]
+
+                    alpha_1 = 1 - left_risk / (left_risk + right_risk)
+
+                    weights.iloc[left] *= alpha_1  # weight 1
+                    weights.iloc[right] *= 1 - alpha_1  # weight 2
+
+        # Get constituents of k clusters
+        clustered_assets = pd.Series(
+            hr.cut_tree(Z, n_clusters=self.k).flatten(), index=self.cov.index
+        )
+        # Multiply within-cluster weight with inter-cluster weight
+        for i in range(self.k):
+            cluster = clustered_assets.loc[clustered_assets == i]
+            cluster_cov = self.cov.loc[cluster.index, cluster.index]
+            cluster_returns = self.returns.loc[:, cluster.index]
+            if model == "HERC":
+                cluster_weights = pd.Series(
+                    self._naive_risk(
+                        cluster_returns, cluster_cov, rm=rm, rf=rf
+                    ).flatten(),
+                    index=cluster_cov.index,
+                )
+
+            elif model == "HERC2":
+                cluster_weights = pd.Series(
+                    self._naive_risk(
+                        cluster_returns, cluster_cov, rm="equal", rf=rf
+                    ).flatten(),
+                    index=cluster_cov.index,
+                )
+            weights.loc[cluster_weights.index] *= cluster_weights
+
+        return weights
+
