@@ -675,3 +675,8 @@ input::placeholder {
     font-size: 1rem !important;
     margin-bottom: 2px !important;
 }
+/* Restrict height of multi-select to prevent huge vertical expansion */
+.selectize-control.multi .selectize-input {
+    max-height: 250px !important;
+    overflow-y: auto !important;
+}

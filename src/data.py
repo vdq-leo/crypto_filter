@@ -218,7 +218,7 @@ class BinanceFuturesFetcher:
             "ask_liquidity": ask_liq
         }
 
-    def get_top_volume_symbols(self, top_n: int = 50, exclude: List[str] = None) -> List[str]:
+    def get_top_volume_symbols(self, top_n: int = 50, exclude: List[str] = None, bottom: bool = False) -> List[str]:
         """Get top N symbols by 24h Quote (USDT) Volume"""
         if exclude is None:
             exclude = ['USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'USTUSDT', 'FDUSDUSDT']
@@ -232,7 +232,8 @@ class BinanceFuturesFetcher:
         
         df = pd.DataFrame(data)
         df['quoteVolume'] = pd.to_numeric(df['quoteVolume'])
-        df = df.sort_values('quoteVolume', ascending=False)
+        # Sort ascending if bottom=True, descending if False
+        df = df.sort_values('quoteVolume', ascending=bottom)
         
         top_symbols = []
         for _, row in df.iterrows():

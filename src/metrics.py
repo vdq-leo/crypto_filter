@@ -58,6 +58,27 @@ def _get_pivots(src, left, right, is_high):
             pivots[i] = src[idx]
     return pivots
 
+@numba.njit
+def _adaptive_ema_numba(x, alpha):
+    a = np.full_like(x, np.nan)
+    if len(x) == 0: return a
+    start_idx = -1
+    for i in range(len(x)):
+        if not np.isnan(x[i]):
+            start_idx = i
+            a[i] = x[i]
+            break
+    if start_idx == -1: return a
+    
+    for i in range(start_idx + 1, len(x)):
+        if np.isnan(x[i]):
+            a[i] = a[i-1]
+        else:
+            curr_alpha = alpha[i]
+            if np.isnan(curr_alpha): curr_alpha = 1.0
+            a[i] = curr_alpha * x[i] + (1 - curr_alpha) * a[i-1]
+    return a
+
 class MetricsEngine:
     """Calculates metrics from price data using vectorized operations."""
     TICKER_24H = "/fapi/v1/ticker/24hr"
@@ -161,6 +182,36 @@ class MetricsEngine:
         return aroon_up, aroon_down
 
     @staticmethod
+    def rsi_adapt(src: pd.Series, w_short: int = 40, w_long: int = 200, vol_factor: float = 1.0) -> pd.Series:
+        ret = np.log(src / src.shift(1))
+        vS = ret.rolling(w_short).std()
+        vL = ret.rolling(w_long).std()
+        a = np.clip(vS / (vL * vol_factor), 0.01, 0.99)
+        return a * MetricsEngine.rsi(src, w_short) + (1 - a) * MetricsEngine.rsi(src, w_long)
+
+    @staticmethod
+    def vama_cma(src: pd.Series, w_short: int = 40, w_long: int = 200, vol_factor: float = 1.0) -> pd.Series:
+        ret = np.log(src / src.shift(1))
+        vS = ret.rolling(w_short).std()
+        vL = ret.rolling(w_long).std()
+        a = 2.0 / (np.maximum(1, np.floor(10.0 / np.minimum(vS / (vL * vol_factor), 1.0))) + 1.0)
+        vama_vals = _adaptive_ema_numba(src.values, a.values)
+        vama = pd.Series(vama_vals, index=src.index)
+        proxy_atr = src.diff().abs().rolling(10).mean().replace(0, 1e-9)
+        return (src - vama) / proxy_atr
+
+    @staticmethod
+    def ewmac(src: pd.Series, w_short: int = 40, w_long: int = 200) -> pd.Series:
+        fast = src.ewm(span=w_short, adjust=False).mean()
+        slow = src.ewm(span=w_long, adjust=False).mean()
+        v = src.rolling(w_short).std().replace(0, 1e-9)
+        return (fast - slow) / v
+
+    @staticmethod
+    def z_score_indicator(src: pd.Series, length: int = 100) -> pd.Series:
+        return (src - src.rolling(length).mean()) / src.rolling(length).std().replace(0, 1e-9)
+
+    @staticmethod
     def vwap(df: pd.DataFrame) -> pd.Series:
         tp = (df['high'] + df['low'] + df['close']) / 3
         return (tp * df['volume']).cumsum() / df['volume'].cumsum()
@@ -189,9 +240,16 @@ class MetricsEngine:
         w_short = int(window * 0.5)
         w_mid = window
 
-        if tail_only and len(df) > w_slow * 2:
+        def should_calc(m):
+            return include_metrics is None or m in include_metrics
+            
+        max_warmup = w_slow * 2
+        if should_calc('rel_strength_z'):
+            max_warmup = max(max_warmup, 120)
+            
+        if tail_only and len(df) > max_warmup:
             # Keep enough history to warm up EMAs and rolling windows
-            df = df.tail(w_slow * 2).copy()
+            df = df.tail(max_warmup).copy()
 
         res = pd.DataFrame(index=df.index)
         close = df['close']
@@ -201,9 +259,6 @@ class MetricsEngine:
 
         # Core returns calculation
         ret = close.pct_change()
-
-        def should_calc(m):
-            return include_metrics is None or m in include_metrics
 
         # 1. EWVA: (EMA_fast - EMA_slow) / STD(price)
         if should_calc('ewva') or should_calc('vol_rank') or should_calc('vwap_z'):
@@ -241,22 +296,47 @@ class MetricsEngine:
             vwp = MetricsEngine.vwap(df)
             res['vwap_z'] = (close - vwp) / std_p
         
-        # 9. Relative Strength Z-Score (vs benchmark)
+        # 9. Relative Strength Z-Score (vs benchmark) via Relative Momentum Composite
         if should_calc('rel_strength_z'):
             if benchmark_prices is not None:
                 common_idx = df.index.intersection(benchmark_prices.index)
-                if len(common_idx) >= window:
+                if len(common_idx) >= 100:
                     asset_p = df.loc[common_idx, 'close']
                     btc_p = benchmark_prices.loc[common_idx]
-                    ratio = asset_p / btc_p.replace(0, 1e-9)
-                    res['rel_strength_z'] = (ratio - ratio.rolling(window).mean()) / ratio.rolling(window).std()
-                    res['rel_strength_z'] = res['rel_strength_z'].fillna(0)
+                    
+                    # Params (Reduced to ~1/3 to require less historical data)
+                    p_short = 13
+                    p_long = 67
+                    beta_len = 33
+                    smooth = 3
+                    volFactor = 1.0
+                    
+                    # Asset Components
+                    a_rsi = MetricsEngine.z_score_indicator(MetricsEngine.rsi_adapt(asset_p, p_short, p_long, volFactor), beta_len)
+                    a_cma = MetricsEngine.z_score_indicator(MetricsEngine.vama_cma(asset_p, p_short, p_long, volFactor), beta_len)
+                    a_ewmac = MetricsEngine.z_score_indicator(MetricsEngine.ewmac(asset_p, p_short, p_long), beta_len)
+                    sym2_idx = (a_rsi + a_cma + a_ewmac) / 3.0
+                    
+                    # Benchmark Components
+                    b_rsi = MetricsEngine.z_score_indicator(MetricsEngine.rsi_adapt(btc_p, p_short, p_long, volFactor), beta_len)
+                    b_cma = MetricsEngine.z_score_indicator(MetricsEngine.vama_cma(btc_p, p_short, p_long, volFactor), beta_len)
+                    b_ewmac = MetricsEngine.z_score_indicator(MetricsEngine.ewmac(btc_p, p_short, p_long), beta_len)
+                    sym1_idx = (b_rsi + b_cma + b_ewmac) / 3.0
+                    
+                    # Spread (BTC - Asset)
+                    spread = sym1_idx - sym2_idx
+                    diff = spread.diff()
+                    
+                    sVol = diff.rolling(p_short).std().clip(lower=1e-6)
+                    lVol = diff.rolling(p_long).std().clip(lower=1e-6)
+                    
+                    alpha = ((1.0 / smooth) / ((lVol * volFactor) / sVol)).clip(lower=0.05, upper=0.95)
+                    alpha = alpha.fillna(0.05)
+                    
+                    spread_s_vals = _adaptive_ema_numba(spread.values, alpha.values)
+                    res['rel_strength_z'] = pd.Series(spread_s_vals, index=common_idx).reindex(df.index).fillna(0.0)
                 else:
                     res['rel_strength_z'] = np.nan
-            elif benchmark_returns is not None:
-                common_idx = ret.index.intersection(benchmark_returns.index)
-                diff = ret.loc[common_idx] - benchmark_returns.loc[common_idx]
-                res['rel_strength_z'] = (diff - diff.ewm(span=window).mean()) / diff.ewm(span=window).std()
             else:
                 res['rel_strength_z'] = np.nan
             
@@ -315,6 +395,21 @@ class MetricsEngine:
             vol = ret.rolling(window).std()
             res['vol_rank'] = vol.rolling(window).rank(pct=True)
             
+        if should_calc('calmar_ratio'):
+            sum_ret = ret.rolling(window).sum()
+            roll_max = close.rolling(window).max()
+            drawdown = (close - roll_max) / roll_max
+            max_dd = drawdown.rolling(window).min().abs().replace(0, 1e-9)
+            res['calmar_ratio'] = sum_ret / max_dd
+            
+        if should_calc('beta_btc') and benchmark_returns is not None:
+            align_df = pd.concat([ret, benchmark_returns], axis=1, join='inner').dropna()
+            if not align_df.empty:
+                cov = align_df.iloc[:, 0].rolling(window).cov(align_df.iloc[:, 1])
+                var = align_df.iloc[:, 1].rolling(window).var().replace(0, 1e-9)
+                beta_series = cov / var
+                res['beta_btc'] = beta_series.reindex(df.index).ffill()
+                
         if should_calc('mr_prob'):
             # --- PineScript Parameters ---
             lookback = 100
@@ -936,18 +1031,18 @@ class MetricsEngine:
             
         return res
 
-    def compute_all_metrics(self, prices_data: Dict[str, pd.DataFrame], interval: str = '1h', benchmark_symbol: str = 'BTCUSDT', benchmark_returns: Optional[pd.Series] = None, window: int = 40) -> pd.DataFrame:
+    def compute_all_metrics(self, prices_data: Dict[str, pd.DataFrame], interval: str = '1h', benchmark_symbol: str = 'BTCUSDT', benchmark_returns: Optional[pd.Series] = None, benchmark_prices: Optional[pd.Series] = None, window: int = 40) -> pd.DataFrame:
         """
         Main pipeline to compute metrics for all symbols.
         """
         results = []
         
         # 1. Prepare Benchmark if not provided
-        benchmark_prices = None
-        if benchmark_symbol in prices_data:
+        if benchmark_prices is None and benchmark_symbol in prices_data:
             b_df = prices_data[benchmark_symbol]
             benchmark_prices = pd.to_numeric(b_df['close'], errors='coerce').ffill().fillna(0)
-            if benchmark_returns is None:
+        
+        if benchmark_prices is not None and benchmark_returns is None:
                 benchmark_returns = benchmark_prices.pct_change().dropna()
             
         from src.data import BinanceFuturesFetcher

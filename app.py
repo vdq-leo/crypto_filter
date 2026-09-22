@@ -103,6 +103,15 @@ app_ui = ui.page_navbar(
     ui.nav_control(
         ui.div(
             ui.div(
+                ui.input_switch(
+                    "quick_vol_bottom",
+                    "Bot Vol",
+                    value=False
+                ),
+                class_="flex-shrink-0 pt-2",
+                style="margin-top: -14px;"
+            ),
+            ui.div(
                 ui.input_selectize(
                     "quick_symbol",
                     None,
@@ -150,10 +159,11 @@ def server(input, output, session):
     
     @reactive.Effect
     def populate_symbols():
+        bottom_vol = input.quick_vol_bottom()
         with ui.Progress(min=0, max=1) as p:
             p.set(0, message="Initializing Market Data...")
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe")
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(bottom_vol).lower()})
                 all_syms = res.json()["symbols"] if res.status_code == 200 else []
             except:
                 all_syms = []

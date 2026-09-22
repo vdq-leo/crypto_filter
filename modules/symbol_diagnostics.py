@@ -200,7 +200,7 @@ def symbol_diagnostics_server(input, output, session, global_interval):
     @reactive.Effect
     def populate_symbols():
         try:
-            res = requests.get(f"{API_BASE_URL}/data/universe")
+            res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
             all_syms = res.json()["symbols"] if res.status_code == 200 else []
         except:
             all_syms = []

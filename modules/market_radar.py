@@ -71,12 +71,11 @@ def market_radar_ui():
                         selected="volume_imbalance"
                     ),
 
-                    # ----- LOG SCALE (single row) -----
+                    # ----- NORMALIZE (single row) -----
                     ui.layout_columns(
-                        ui.input_checkbox("x_log", "Rank X"),
-                        ui.input_checkbox("y_log", "Rank Y"),
-                        # ui.input_checkbox("z_log", "Log Z"),
-                        col_widths=[5, 5]
+                        ui.input_select("x_norm", "Norm X", choices=["None", "Rank", "Z-Score"], selected="None"),
+                        ui.input_select("y_norm", "Norm Y", choices=["None", "Rank", "Z-Score"], selected="None"),
+                        col_widths=[6, 6]
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -178,9 +177,9 @@ def market_radar_ui():
 
                     # ----- LOG SCALE (single row) -----
                     ui.layout_columns(
-                        ui.input_checkbox("rpg_x_log", "Rank X"),
-                        ui.input_checkbox("rpg_y_log", "Rank Y"),
-                        col_widths=[5, 5]
+                        ui.input_select("rpg_x_norm", "Norm X", choices=["None", "Rank", "Z-Score"], selected="None"),
+                        ui.input_select("rpg_y_norm", "Norm Y", choices=["None", "Rank", "Z-Score"], selected="None"),
+                        col_widths=[6, 6]
                     ),
 
                     ui.hr(class_="mt-2 mb-2"),
@@ -272,7 +271,7 @@ def market_radar_server(input, output, session, global_interval):
         if not selected_symbols_radar.get():
             try:
                 n = int(input.n_assets_radar() or 20)
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n, "bottom": str(input.quick_vol_bottom()).lower()})
                 syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"Initial symbol sync failed: {e}")
@@ -288,7 +287,7 @@ def market_radar_server(input, output, session, global_interval):
         try:
             n = int(input.n_assets_radar() or 20)
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n, "bottom": str(input.quick_vol_bottom()).lower()})
                 syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"Radar volume filter failed: {e}")
@@ -303,7 +302,7 @@ def market_radar_server(input, output, session, global_interval):
             selected_symbols_radar.set(new_syms)
             # Fetch full universe for dropdown choices
             try:
-                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                res_all = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
                 all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else list(new_syms)
             except:
                 all_syms = list(new_syms)
@@ -318,7 +317,7 @@ def market_radar_server(input, output, session, global_interval):
             val = input.n_assets_rpg()
             n = int(val) if val else 20
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n, "bottom": str(input.quick_vol_bottom()).lower()})
                 syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 logger.log("Market Radar", "ERROR", f"RPG volume filter failed: {e}")
@@ -332,7 +331,7 @@ def market_radar_server(input, output, session, global_interval):
             ui.update_text("n_assets_rpg", value=str(n))
             selected_symbols_rpg.set(new_syms)
             try:
-                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                res_all = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
                 all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else list(new_syms)
             except:
                 all_syms = list(new_syms)
@@ -356,7 +355,7 @@ def market_radar_server(input, output, session, global_interval):
     @reactive.event(input.radar_interval, ignore_init=True)
     def _update_symbol_choices():
         try:
-            res = requests.get(f"{API_BASE_URL}/data/universe")
+            res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
             all_syms = res.json()["symbols"] if res.status_code == 200 else []
         except:
             all_syms = []
@@ -381,7 +380,7 @@ def market_radar_server(input, output, session, global_interval):
             # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n_assets})
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n_assets, "bottom": str(input.quick_vol_bottom()).lower()})
                 new_syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 ui.notification_show(f"Market Data Error: {str(e)}", type="error")
@@ -394,7 +393,7 @@ def market_radar_server(input, output, session, global_interval):
             
             # 2. Update UI
             try:
-                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                res_all = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
                 all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else syms
             except:
                 all_syms = syms
@@ -425,7 +424,7 @@ def market_radar_server(input, output, session, global_interval):
             # 1. Populate Symbols
             p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n_assets} high-volume assets")
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n_assets})
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n_assets, "bottom": str(input.quick_vol_bottom()).lower()})
                 new_syms = res.json()["symbols"] if res.status_code == 200 else []
             except Exception as e:
                 ui.notification_show(f"Path Analysis Error: {str(e)}", type="error")
@@ -435,7 +434,7 @@ def market_radar_server(input, output, session, global_interval):
             
             # 2. Update UI
             try:
-                res_all = requests.get(f"{API_BASE_URL}/data/universe")
+                res_all = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
                 all_syms = res_all.json()["symbols"] if res_all.status_code == 200 else syms
             except:
                 all_syms = syms
@@ -537,10 +536,22 @@ def market_radar_server(input, output, session, global_interval):
         x = input.x_axis()
         y = input.y_axis()
         
-        if input.x_log() and x in df.columns:
-            df[x] = pd.to_numeric(df[x], errors='coerce').rank(pct=True)
-        if input.y_log() and y in df.columns:
-            df[y] = pd.to_numeric(df[y], errors='coerce').rank(pct=True)
+        x_norm = input.x_norm()
+        y_norm = input.y_norm()
+
+        if x in df.columns:
+            if x_norm == "Rank":
+                df[x] = pd.to_numeric(df[x], errors='coerce').rank(pct=True)
+            elif x_norm == "Z-Score":
+                series = pd.to_numeric(df[x], errors='coerce')
+                df[x] = (series - series.mean()) / series.std()
+
+        if y in df.columns:
+            if y_norm == "Rank":
+                df[y] = pd.to_numeric(df[y], errors='coerce').rank(pct=True)
+            elif y_norm == "Z-Score":
+                series = pd.to_numeric(df[y], errors='coerce')
+                df[y] = (series - series.mean()) / series.std()
             
         return df
 
@@ -838,14 +849,14 @@ def market_radar_server(input, output, session, global_interval):
     @reactive.Effect
     def _populate_initial_symbols():
         try:
-            res = requests.get(f"{API_BASE_URL}/data/universe")
+            res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
             all_syms = res.json()["symbols"] if res.status_code == 200 else []
         except:
             all_syms = []
             
         n = int(input.n_assets_radar() or 20)
         try:
-            res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n})
+            res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n, "bottom": str(input.quick_vol_bottom()).lower()})
             syms = res.json()["symbols"] if res.status_code == 200 else []
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"Initial pop-up sync failed: {e}")
@@ -922,10 +933,20 @@ def market_radar_server(input, output, session, global_interval):
         focus_sym = (input.rpg_focus_symbol() or "").strip().upper()
         has_focus = focus_sym in df['Symbol'].str.upper().values
         
-        if input.rpg_x_log() and 'X_Value' in df.columns:
-            df['X_Value'] = df['X_Value'].rank(pct=True)
-        if input.rpg_y_log() and 'Y_Value' in df.columns:
-            df['Y_Value'] = df['Y_Value'].rank(pct=True)
+        x_norm = input.rpg_x_norm()
+        y_norm = input.rpg_y_norm()
+
+        if 'X_Value' in df.columns:
+            if x_norm == "Rank":
+                df['X_Value'] = df['X_Value'].rank(pct=True)
+            elif x_norm == "Z-Score":
+                df['X_Value'] = (df['X_Value'] - df['X_Value'].mean()) / df['X_Value'].std()
+
+        if 'Y_Value' in df.columns:
+            if y_norm == "Rank":
+                df['Y_Value'] = df['Y_Value'].rank(pct=True)
+            elif y_norm == "Z-Score":
+                df['Y_Value'] = (df['Y_Value'] - df['Y_Value'].mean()) / df['Y_Value'].std()
             
         fig = px.line(
             df, x='X_Value', y='Y_Value', color='Symbol',

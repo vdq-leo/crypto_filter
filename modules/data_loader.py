@@ -118,7 +118,7 @@ def data_loader_server(input, output, session):
         with ui.Progress(min=1, max=15) as p:
             p.set(message="Fetching top symbols...", detail="Please wait")
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": input.top_n()})
+                res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": input.top_n(), "bottom": str(input.quick_vol_bottom()).lower()})
                 if res.status_code == 200:
                     new_syms = res.json()["symbols"]
                     combined = set(MANDATORY_CRYPTO).union(new_syms)

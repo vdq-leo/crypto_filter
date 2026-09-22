@@ -27,10 +27,10 @@ class FetchRequest(BaseModel):
     limit: int = 1000
 
 @router.get("/universe")
-def get_universe(top_n: int = 50):
+def get_universe(top_n: int = 50, bottom: bool = False):
     """Get top N symbols combining mandatory and top volume from Binance."""
     try:
-        new_syms = fetcher.get_top_volume_symbols(top_n=top_n)
+        new_syms = fetcher.get_top_volume_symbols(top_n=top_n, bottom=bottom)
         combined = set(MANDATORY_CRYPTO).union(new_syms)
         filtered = {s for s in combined if s not in IGNORED_CRYPTO}
         return {"symbols": sorted(list(filtered))}

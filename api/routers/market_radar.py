@@ -37,15 +37,17 @@ def get_metric_key(m: str) -> str:
 def get_market_snapshot(req: SnapshotRequest):
     """Calculate market radar snapshot metrics for a list of symbols."""
     try:
-        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=False)
+        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=True)
         benchmark_returns = None
+        benchmark_prices = None
         if benchmark_df is not None and not benchmark_df.empty:
             b_close = pd.to_numeric(benchmark_df['close'], errors='coerce').ffill().fillna(0)
+            benchmark_prices = b_close
             benchmark_returns = b_close.pct_change().dropna()
 
         def process_symbol(sym):
             try:
-                df = manager.load_data(sym, req.interval, auto_sync=False)
+                df = manager.load_data(sym, req.interval, auto_sync=True)
                 if df is not None and not df.empty:
                     df = df.tail(req.filter_window * 5)
                     if not df.empty:
@@ -54,6 +56,7 @@ def get_market_snapshot(req: SnapshotRequest):
                             interval=req.interval, 
                             benchmark_symbol=BENCHMARK_SYMBOL,
                             benchmark_returns=benchmark_returns,
+                            benchmark_prices=benchmark_prices,
                             window=req.filter_window
                         )
             except Exception as e:
@@ -92,16 +95,22 @@ def get_path_analysis(req: PathRequest):
         key_y = get_metric_key(req.y_metric)
         required_metrics = list(set([key_x, key_y]))
 
+        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=True)
+        benchmark_prices = None
+        if benchmark_df is not None and not benchmark_df.empty:
+            benchmark_prices = pd.to_numeric(benchmark_df['close'], errors='coerce').ffill().fillna(0)
+
         def process_rpg_symbol(sym):
             try:
-                df = manager.load_data(sym, req.interval, auto_sync=False)
+                df = manager.load_data(sym, req.interval, auto_sync=True)
                 if df is not None and not df.empty:
                     df['close'] = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(0)
                     inds = engine.calculate_all_indicators(
                         df, 
                         window=req.filter_window, 
                         interval=req.interval,
-                        include_metrics=required_metrics
+                        include_metrics=required_metrics,
+                        benchmark_prices=benchmark_prices
                     )
                     
                     if key_x in inds.columns and key_y in inds.columns:

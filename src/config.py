@@ -60,6 +60,8 @@ METRIC_LABELS = {
     'cmf': 'Chaikin Money Flow',
     'vwap_z': 'VWAP Z-Score',
     'rel_strength_z': 'RS Z-Score',
+    'calmar_ratio': 'Calmar Ratio',
+    'beta_btc': 'BTC Beta',
     'price_zscore': 'Price Z-Score',
     'vam': 'VAM (Vol-Adj Momentum)',
     'skewness': 'Return Skewness',
@@ -97,7 +99,7 @@ METRIC_LABELS = {
 
 # List of all available numeric metrics for axes
 ALL_METRICS = [
-    'rel_strength_z',
+    'rel_strength_z', 'calmar_ratio', 'beta_btc',
     'price_zscore', 'vam',
     'volatility','vol_imbalance', 'fip', 
     'adf_hist', 'adf_stat', 'ewva', 'aroon_osc', 
