@@ -761,7 +761,8 @@ def predictive_server(input, output, session, global_universe):
         if not uni: 
             return ui.div(ui.p("Loading symbol universe...", class_="text-info small mt-2"))
         
-        sel = 'BTCUSDT' if 'BTCUSDT' in uni else (uni[0] if uni else None)
+        curr = input.selected_ticker() if "selected_ticker" in input else None
+        sel = curr if (curr and curr in uni) else ('BTCUSDT' if 'BTCUSDT' in uni else (uni[0] if uni else None))
         return ui.input_select("selected_ticker", "Symbol", choices=uni, selected=sel)
 
     @reactive.effect

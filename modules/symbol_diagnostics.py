@@ -213,7 +213,7 @@ def symbol_diagnostics_server(input, output, session, global_interval, global_un
             all_syms = g_syms
         else:
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
+                res = requests.get(f"{API_BASE_URL}/data/universe")
                 all_syms = res.json()["symbols"] if res.status_code == 200 else []
             except:
                 all_syms = []

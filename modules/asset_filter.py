@@ -209,8 +209,8 @@ def asset_filter_server(*args, **kwargs):
                 all_types.set(t_list)
                 all_subtypes.set(st_list)
                 meta_store.set(data.get("symbol_meta", {}))
-                ui.update_selectize("asset_filter_types", choices=t_list)
-                ui.update_selectize("asset_filter_subtypes", choices=st_list)
+                ui.update_selectize("asset_filter_types", choices=t_list, session=session)
+                ui.update_selectize("asset_filter_subtypes", choices=st_list, session=session)
                 if filtered_df.get().empty:
                     await do_fetch()
         except Exception as e:
@@ -221,26 +221,26 @@ def asset_filter_server(*args, **kwargs):
     @reactive.event(input.asset_filter_types_all)
     def _select_all_types():
         t = all_types.get() or DEFAULT_TYPES
-        ui.update_selectize("asset_filter_types", choices=t, selected=t)
+        ui.update_selectize("asset_filter_types", choices=t, selected=t, session=session)
 
     @reactive.effect
     @reactive.event(input.asset_filter_types_clear)
     def _clear_types():
         t = all_types.get() or DEFAULT_TYPES
-        ui.update_selectize("asset_filter_types", choices=t, selected=[])
+        ui.update_selectize("asset_filter_types", choices=t, selected=[], session=session)
 
     # Select All / Clear Handlers for Asset Sub-Types
     @reactive.effect
     @reactive.event(input.asset_filter_subtypes_all)
     def _select_all_subtypes():
         st = all_subtypes.get() or DEFAULT_SUBTYPES
-        ui.update_selectize("asset_filter_subtypes", choices=st, selected=st)
+        ui.update_selectize("asset_filter_subtypes", choices=st, selected=st, session=session)
 
     @reactive.effect
     @reactive.event(input.asset_filter_subtypes_clear)
     def _clear_subtypes():
         st = all_subtypes.get() or DEFAULT_SUBTYPES
-        ui.update_selectize("asset_filter_subtypes", choices=st, selected=[])
+        ui.update_selectize("asset_filter_subtypes", choices=st, selected=[], session=session)
 
     @render.ui
     def asset_filter_status():
@@ -341,17 +341,12 @@ def asset_filter_server(*args, **kwargs):
                 
                 # Default: select all rows in table and selectize
                 try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=syms, selected=syms)
+                    ui.update_selectize("asset_filter_selected_symbols", choices=syms, selected=syms, session=session)
                 except Exception:
                     pass
 
                 try:
                     await asset_filter_table.update_cell_selection("all")
-                except Exception:
-                    pass
-
-                try:
-                    ui.update_selectize("quick_symbol", choices=syms, selected=syms)
                 except Exception:
                     pass
             else:
@@ -368,7 +363,7 @@ def asset_filter_server(*args, **kwargs):
             sync_state["bulk_in_progress"] = False
 
     @reactive.effect
-    @reactive.event(input.asset_filter_btn_apply, ignore_init=False)
+    @reactive.event(input.asset_filter_btn_apply, ignore_init=True)
     async def _on_apply():
         await do_fetch()
 
@@ -383,11 +378,7 @@ def asset_filter_server(*args, **kwargs):
             try:
                 global_universe.set(all_syms)
                 try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=all_syms)
-                except Exception:
-                    pass
-                try:
-                    ui.update_selectize("quick_symbol", choices=all_syms, selected=all_syms)
+                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=all_syms, session=session)
                 except Exception:
                     pass
                 try:
@@ -407,11 +398,7 @@ def asset_filter_server(*args, **kwargs):
             all_syms = df["Symbol"].tolist() if (not df.empty and "Symbol" in df.columns) else []
             global_universe.set([])
             try:
-                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[])
-            except Exception:
-                pass
-            try:
-                ui.update_selectize("quick_symbol", choices=[], selected=[])
+                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[], session=session)
             except Exception:
                 pass
             try:
@@ -441,10 +428,6 @@ def asset_filter_server(*args, **kwargs):
                     await asset_filter_table.update_cell_selection({"type": "row", "rows": tuple(rows)})
                 except Exception:
                     pass
-            try:
-                ui.update_selectize("quick_symbol", choices=selected, selected=selected)
-            except Exception:
-                pass
 
     # Sync Table Row Selection to Select Box and global_universe
     @reactive.effect
@@ -467,11 +450,7 @@ def asset_filter_server(*args, **kwargs):
             if current:
                 global_universe.set([])
                 try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[])
-                except Exception:
-                    pass
-                try:
-                    ui.update_selectize("quick_symbol", choices=[], selected=[])
+                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[], session=session)
                 except Exception:
                     pass
             return
@@ -481,11 +460,7 @@ def asset_filter_server(*args, **kwargs):
             if current:
                 global_universe.set([])
                 try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[])
-                except Exception:
-                    pass
-                try:
-                    ui.update_selectize("quick_symbol", choices=[], selected=[])
+                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[], session=session)
                 except Exception:
                     pass
             return
@@ -495,10 +470,6 @@ def asset_filter_server(*args, **kwargs):
         if set(selected_symbols) != set(current):
             global_universe.set(selected_symbols)
             try:
-                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=selected_symbols)
-            except Exception:
-                pass
-            try:
-                ui.update_selectize("quick_symbol", choices=selected_symbols, selected=selected_symbols)
+                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=selected_symbols, session=session)
             except Exception:
                 pass

@@ -757,27 +757,6 @@ def market_radar_server(input, output, session, global_interval, global_universe
         
         return ui.HTML(metrics_html)
 
-    @reactive.Effect
-    def _populate_initial_symbols():
-        try:
-            res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(input.quick_vol_bottom()).lower()})
-            all_syms = res.json()["symbols"] if res.status_code == 200 else []
-        except:
-            all_syms = []
-            
-        n = int(input.n_assets_radar() or 20)
-        try:
-            res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": n, "bottom": str(input.quick_vol_bottom()).lower()})
-            syms = res.json()["symbols"] if res.status_code == 200 else []
-        except Exception as e:
-            logger.log("Market Radar", "ERROR", f"Initial pop-up sync failed: {e}")
-            syms = []
-            
-        new_syms = set(MANDATORY_CRYPTO).union(syms)
-        new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
-        ui.update_selectize("radar_symbols", choices=all_syms, selected=sorted(list(new_syms)), server=True)
-        ui.update_selectize("rpg_symbols", choices=all_syms, selected=sorted(list(new_syms)), server=True)
-
     @reactive.effect
     @reactive.event(input.btn_gen_rpg)
     async def _():

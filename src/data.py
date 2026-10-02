@@ -47,6 +47,10 @@ class BinanceFuturesFetcher:
     _adl_risk_cache = {}
     _adl_risk_last_fetch = 0.0
     _stats_cache = {}
+    _exchange_info_cache = None
+    _exchange_info_last_fetch = 0.0
+    _universe_meta_cache = None
+    _universe_meta_last_fetch = 0.0
     _cache_expiry = 300.0  # 5 minutes cache
     _cache_lock = threading.Lock()
     
@@ -218,9 +222,28 @@ class BinanceFuturesFetcher:
             "ask_liquidity": ask_liq
         }
 
-    def get_universe_metadata(self) -> dict:
-        """Fetch all unique underlying types and subtypes from exchange info"""
+    def get_exchange_info(self) -> dict:
+        """Fetch and cache Binance exchange info."""
+        now = time.time()
+        with BinanceFuturesFetcher._cache_lock:
+            if BinanceFuturesFetcher._exchange_info_cache and (now - BinanceFuturesFetcher._exchange_info_last_fetch < BinanceFuturesFetcher._cache_expiry):
+                return BinanceFuturesFetcher._exchange_info_cache
+        
         info = self._request(self.EXCHANGE_INFO)
+        if info:
+            with BinanceFuturesFetcher._cache_lock:
+                BinanceFuturesFetcher._exchange_info_cache = info
+                BinanceFuturesFetcher._exchange_info_last_fetch = now
+        return info or {}
+
+    def get_universe_metadata(self) -> dict:
+        """Fetch all unique underlying types and subtypes from exchange info with caching"""
+        now = time.time()
+        with BinanceFuturesFetcher._cache_lock:
+            if BinanceFuturesFetcher._universe_meta_cache and (now - BinanceFuturesFetcher._universe_meta_last_fetch < BinanceFuturesFetcher._cache_expiry):
+                return BinanceFuturesFetcher._universe_meta_cache
+
+        info = self.get_exchange_info()
         if not info or 'symbols' not in info:
             return {"types": [], "subtypes": [], "symbol_meta": {}}
             
@@ -229,8 +252,8 @@ class BinanceFuturesFetcher:
         symbol_meta = {}
         has_empty_subtypes = False
         
-        for s in info['symbols']:
-            if s['status'] == 'TRADING' and s['contractType'] == 'PERPETUAL' and s['symbol'].endswith('USDT'):
+        for s in info.get('symbols', []):
+            if s.get('status') == 'TRADING' and s.get('contractType') == 'PERPETUAL' and s.get('symbol', '').endswith('USDT'):
                 sym = s['symbol']
                 t = s.get('underlyingType')
                 st = s.get('underlyingSubType', [])
@@ -251,11 +274,16 @@ class BinanceFuturesFetcher:
         if has_empty_subtypes:
             subtypes_list.insert(0, "-")
             
-        return {
+        result = {
             "types": sorted(list(types)),
             "subtypes": subtypes_list,
             "symbol_meta": symbol_meta
         }
+        with BinanceFuturesFetcher._cache_lock:
+            BinanceFuturesFetcher._universe_meta_cache = result
+            BinanceFuturesFetcher._universe_meta_last_fetch = now
+
+        return result
 
     def get_top_volume_symbols_with_meta(self, top_n: int = 50, exclude: List[str] = None, bottom: bool = False, types: List[str] = None, subtypes: List[str] = None) -> List[dict]:
         """Get top N symbols with volume and metadata, optionally filtered by types/subtypes"""
@@ -295,11 +323,7 @@ class BinanceFuturesFetcher:
                 if not s_subs or len(s_subs) == 0:
                     has_sub = ("-" in subtypes)
                 else:
-                    spec = [s for s in s_subs if s != 'Crypto']
-                    if spec:
-                        has_sub = any(sub in subtypes for sub in spec)
-                    else:
-                        has_sub = ('Crypto' in subtypes)
+                    has_sub = any(sub in subtypes for sub in s_subs)
                 if not has_sub:
                     continue
             
@@ -332,7 +356,7 @@ class BinanceFuturesFetcher:
 
     def get_all_symbols(self) -> List[str]:
         """Get all valid USDT perpetual symbols"""
-        info = self._request(self.EXCHANGE_INFO)
+        info = self.get_exchange_info()
         if not info or 'symbols' not in info:
             return []
             

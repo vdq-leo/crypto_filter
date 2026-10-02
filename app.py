@@ -57,6 +57,11 @@ app_ui = ui.page_navbar(
                 ),
                 ui.layout_columns(
                     ui.card(
+                        ui.card_header("Asset Filter"),
+                        ui.p("Global universe & metadata filtering (Type, Sub-Type, Volume)."),
+                        ui.input_action_button("go_asset_filter", "open_asset_filter", class_="btn-primary w-100")
+                    ),
+                    ui.card(
                         ui.card_header("Diagnostics"),
                         ui.p("Deep Quantitative Symbol Diagnostics"),
                         ui.input_action_button("go_diagnostics", "open_diagnostics", class_="btn-primary w-100")
@@ -81,7 +86,7 @@ app_ui = ui.page_navbar(
                         ui.p("Statistical arbitrage & pair trading analytics."),
                         ui.input_action_button("go_pair_radar", "open_pair_radar", class_="btn-primary w-100")
                     ),
-                    col_widths=[3,3,3,3]
+                    col_widths=[4, 4, 4, 4, 4, 4]
                 ),
                 class_="hero-container text-center py-5"
             ),
@@ -189,6 +194,11 @@ def server(input, output, session):
             </div>
         """)
     
+    @reactive.Effect
+    @reactive.event(input.go_asset_filter)
+    def _go_asset_filter():
+        ui.update_navset("main_nav", selected="ASSET_FILTER")
+
     @reactive.Effect
     @reactive.event(input.go_predictive)
     def _go_predictive():
