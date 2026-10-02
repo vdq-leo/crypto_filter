@@ -524,6 +524,24 @@ td[role="gridcell"] {
     background-color: rgba(25, 77, 163, 0.2) !important;
 }
 
+/* High contrast selected rows in tables and DataGrid */
+.shiny-data-frame tr[aria-selected="true"] td,
+.shiny-data-frame tr[aria-selected="true"] th,
+.shiny-data-frame td[aria-selected="true"],
+.table tr[aria-selected="true"] td,
+.table td[aria-selected="true"],
+.table-active td,
+tr[aria-selected="true"] {
+    background-color: var(--primary-orange) !important;
+    color: #000000 !important;
+    font-weight: 700 !important;
+}
+
+.shiny-data-frame tr[aria-selected="true"] td *,
+.table tr[aria-selected="true"] td * {
+    color: #000000 !important;
+}
+
 /* =========================
    Code & Console
 ========================= */

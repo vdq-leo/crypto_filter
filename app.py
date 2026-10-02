@@ -23,6 +23,7 @@ from modules.activity_logs import activity_logs_ui, activity_logs_server
 from modules.symbol_diagnostics import symbol_diagnostics_ui, symbol_diagnostics_server
 from modules.pair_radar import pair_radar_ui, pair_radar_server
 from modules.portfolio_allocation import portfolio_allocation_ui, portfolio_allocation_server
+from modules.asset_filter import asset_filter_ui, asset_filter_server
 from src.config import BENCHMARK_SYMBOL, API_BASE_URL
 from datetime import datetime, timedelta
 
@@ -88,6 +89,7 @@ app_ui = ui.page_navbar(
         )
     ),
 
+    ui.nav_panel("ASSET_FILTER", asset_filter_ui()),
     ui.nav_panel("DATA_MANAGER", data_loader_ui()),
     ui.nav_panel("DIAGNOSTICS", symbol_diagnostics_ui()),
     ui.nav_panel("MARKET_RADAR", market_radar_ui()),
@@ -102,15 +104,6 @@ app_ui = ui.page_navbar(
     ui.nav_spacer(),
     ui.nav_control(
         ui.div(
-            ui.div(
-                ui.input_switch(
-                    "quick_vol_bottom",
-                    "Bot Vol",
-                    value=False
-                ),
-                class_="flex-shrink-0 pt-2",
-                style="margin-top: -14px;"
-            ),
             ui.div(
                 ui.input_selectize(
                     "quick_symbol",
@@ -140,6 +133,7 @@ app_ui = ui.page_navbar(
 def server(input, output, session):
     # Shared global state if needed
     global_interval = reactive.Value("1h")
+    global_universe = reactive.Value([])
     
     diag_data = reactive.Value({})
     data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"}})
@@ -159,16 +153,23 @@ def server(input, output, session):
     
     @reactive.Effect
     def populate_symbols():
-        bottom_vol = input.quick_vol_bottom()
-        with ui.Progress(min=0, max=1) as p:
-            p.set(0, message="Initializing Market Data...")
-            try:
-                res = requests.get(f"{API_BASE_URL}/data/universe", params={"bottom": str(bottom_vol).lower()})
-                all_syms = res.json()["symbols"] if res.status_code == 200 else []
-            except:
-                all_syms = []
-            p.set(1, message="Populating Global Selectors...")
-            ui.update_selectize("quick_symbol", choices=all_syms, server=True)
+        if global_universe.get():
+            return
+        try:
+            res = requests.get(f"{API_BASE_URL}/data/universe")
+            all_syms = res.json()["symbols"] if res.status_code == 200 else []
+        except:
+            all_syms = []
+        if all_syms and not global_universe.get():
+            global_universe.set(all_syms)
+        ui.update_selectize("quick_symbol", choices=all_syms, server=True)
+
+    @reactive.effect
+    @reactive.event(global_universe)
+    def _sync_navbar_quick_symbol():
+        syms = global_universe.get()
+        if syms:
+            ui.update_selectize("quick_symbol", choices=syms, server=True)
 
         # Set benchmark/global timestamps once
         try:
@@ -242,12 +243,13 @@ def server(input, output, session):
         ui.update_selectize("quick_symbol", selected=[])
 
     data_loader_server(input, output, session)
-    market_radar_server(input, output, session, global_interval)
-    predictive_server(input, output, session)
-    multivariate_analysis_server(input, output, session)
-    pair_radar_server(input, output, session, global_interval)
-    portfolio_allocation_server(input, output, session)
-    symbol_diagnostics_server(input, output, session, global_interval)
+    market_radar_server(input, output, session, global_interval, global_universe)
+    predictive_server(input, output, session, global_universe)
+    multivariate_analysis_server(input, output, session, global_universe)
+    pair_radar_server(input, output, session, global_interval, global_universe)
+    portfolio_allocation_server(input, output, session, global_universe)
+    symbol_diagnostics_server(input, output, session, global_interval, global_universe)
     activity_logs_server(input, output, session)
+    asset_filter_server(input, output, session, global_universe)
 
 app = App(app_ui, server)

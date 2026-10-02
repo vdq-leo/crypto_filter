@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from src.data import BinanceFuturesFetcher, DataManager
@@ -26,14 +26,30 @@ class FetchRequest(BaseModel):
     days_back: int = 30
     limit: int = 1000
 
-@router.get("/universe")
-def get_universe(top_n: int = 50, bottom: bool = False):
-    """Get top N symbols combining mandatory and top volume from Binance."""
+@router.get("/universe/meta")
+def get_universe_meta():
+    """Get unique underlying types and subtypes."""
     try:
-        new_syms = fetcher.get_top_volume_symbols(top_n=top_n, bottom=bottom)
-        combined = set(MANDATORY_CRYPTO).union(new_syms)
-        filtered = {s for s in combined if s not in IGNORED_CRYPTO}
-        return {"symbols": sorted(list(filtered))}
+        return fetcher.get_universe_metadata()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/universe")
+def get_universe(
+    top_n: int = 50, 
+    bottom: bool = False,
+    types: List[str] = Query(default=None),
+    subtypes: List[str] = Query(default=None)
+):
+    """Get top N symbols with volume and metadata from Binance."""
+    try:
+        items = fetcher.get_top_volume_symbols_with_meta(top_n=top_n, bottom=bottom, types=types, subtypes=subtypes)
+        filtered_items = [item for item in items if item["symbol"] not in IGNORED_CRYPTO]
+        symbols = [item["symbol"] for item in filtered_items]
+        return {
+            "symbols": symbols,
+            "items": filtered_items
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

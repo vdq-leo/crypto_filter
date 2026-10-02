@@ -218,8 +218,47 @@ class BinanceFuturesFetcher:
             "ask_liquidity": ask_liq
         }
 
-    def get_top_volume_symbols(self, top_n: int = 50, exclude: List[str] = None, bottom: bool = False) -> List[str]:
-        """Get top N symbols by 24h Quote (USDT) Volume"""
+    def get_universe_metadata(self) -> dict:
+        """Fetch all unique underlying types and subtypes from exchange info"""
+        info = self._request(self.EXCHANGE_INFO)
+        if not info or 'symbols' not in info:
+            return {"types": [], "subtypes": [], "symbol_meta": {}}
+            
+        types = set()
+        subtypes = set()
+        symbol_meta = {}
+        has_empty_subtypes = False
+        
+        for s in info['symbols']:
+            if s['status'] == 'TRADING' and s['contractType'] == 'PERPETUAL' and s['symbol'].endswith('USDT'):
+                sym = s['symbol']
+                t = s.get('underlyingType')
+                st = s.get('underlyingSubType', [])
+                
+                if t: types.add(t)
+                if not st or len(st) == 0:
+                    has_empty_subtypes = True
+                else:
+                    for sub in st:
+                        subtypes.add(sub)
+                    
+                symbol_meta[sym] = {
+                    "type": t,
+                    "subtypes": st
+                }
+                
+        subtypes_list = sorted(list(subtypes))
+        if has_empty_subtypes:
+            subtypes_list.insert(0, "-")
+            
+        return {
+            "types": sorted(list(types)),
+            "subtypes": subtypes_list,
+            "symbol_meta": symbol_meta
+        }
+
+    def get_top_volume_symbols_with_meta(self, top_n: int = 50, exclude: List[str] = None, bottom: bool = False, types: List[str] = None, subtypes: List[str] = None) -> List[dict]:
+        """Get top N symbols with volume and metadata, optionally filtered by types/subtypes"""
         if exclude is None:
             exclude = ['USDCUSDT', 'BUSDUSDT', 'TUSDUSDT', 'USTUSDT', 'FDUSDUSDT']
             
@@ -230,19 +269,66 @@ class BinanceFuturesFetcher:
         data = self._request(self.TICKER_24H)
         if not data: return []
         
+        meta_res = self.get_universe_metadata()
+        meta = meta_res.get("symbol_meta", {})
+        
         df = pd.DataFrame(data)
-        df['quoteVolume'] = pd.to_numeric(df['quoteVolume'])
-        # Sort ascending if bottom=True, descending if False
+        df['quoteVolume'] = pd.to_numeric(df['quoteVolume'], errors='coerce').fillna(0.0)
         df = df.sort_values('quoteVolume', ascending=bottom)
         
-        top_symbols = []
+        results = []
         for _, row in df.iterrows():
             sym = row['symbol']
-            if sym.endswith('USDT') and sym not in exclude:
-                top_symbols.append(sym)
-                if len(top_symbols) >= int(top_n):
-                    break
-        return top_symbols
+            if not sym.endswith('USDT') or sym in exclude:
+                continue
+                
+            s_meta = meta.get(sym, {})
+            s_type = s_meta.get('type') or 'COIN'
+            s_subs = s_meta.get('subtypes', [])
+            
+            # Check types match (if types filter provided)
+            if types and s_type not in types:
+                continue
+                
+            # Check subtypes match (if subtypes filter provided)
+            if subtypes:
+                if not s_subs or len(s_subs) == 0:
+                    has_sub = ("-" in subtypes)
+                else:
+                    spec = [s for s in s_subs if s != 'Crypto']
+                    if spec:
+                        has_sub = any(sub in subtypes for sub in spec)
+                    else:
+                        has_sub = ('Crypto' in subtypes)
+                if not has_sub:
+                    continue
+            
+            vol = float(row['quoteVolume'])
+            if vol >= 1e9:
+                vol_fmt = f"${vol/1e9:.2f}B"
+            elif vol >= 1e6:
+                vol_fmt = f"${vol/1e6:.2f}M"
+            elif vol >= 1e3:
+                vol_fmt = f"${vol/1e3:.2f}K"
+            else:
+                vol_fmt = f"${vol:.0f}"
+
+            results.append({
+                "symbol": sym,
+                "type": s_type,
+                "subtypes": s_subs,
+                "volume": vol,
+                "volume_formatted": vol_fmt
+            })
+            if len(results) >= int(top_n):
+                break
+                
+        return results
+
+    def get_top_volume_symbols(self, top_n: int = 50, exclude: List[str] = None, bottom: bool = False, types: List[str] = None, subtypes: List[str] = None) -> List[str]:
+        """Get top N symbols by 24h Quote (USDT) Volume, optionally filtered by types/subtypes"""
+        items = self.get_top_volume_symbols_with_meta(top_n=top_n, exclude=exclude, bottom=bottom, types=types, subtypes=subtypes)
+        return [i['symbol'] for i in items]
 
     def get_all_symbols(self) -> List[str]:
         """Get all valid USDT perpetual symbols"""

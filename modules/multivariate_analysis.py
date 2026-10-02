@@ -1,5 +1,6 @@
 from shiny import ui, render, reactive
 from shinywidgets import output_widget, render_widget
+import faicons as fa
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -36,6 +37,7 @@ def multivariate_analysis_ui():
                         "Generate Matrix",
                         class_="btn-primary w-100 mt-3"
                     ),
+                    ui.output_ui("corr_universe_badge"),
 
                     ui.input_selectize(
                         "focus_corr_symbol",
@@ -116,20 +118,8 @@ def multivariate_analysis_ui():
                         max=2000
                     ),
 
-                    ui.input_text(
-                        "n_assets",
-                        "Top Volume",
-                        value="50",
-                        placeholder="e.g. 50",
-                        update_on="blur"
-                    ),
-
-                    ui.input_selectize(
-                        "corr_symbols",
-                        "Select Symbols",
-                        choices=[],
-                        multiple=True
-                    )
+                    ui.hr(class_="mt-2 mb-2"),
+                    ui.p("Assets are managed globally in the ASSET FILTER tab.", class_="text-muted small")
                 ),
                 ui.output_ui("matrix_view")
             )
@@ -144,6 +134,7 @@ def multivariate_analysis_ui():
                         "Run Decomposition",
                         class_="btn-primary w-100 mt-3"
                     ),
+                    ui.output_ui("decomp_universe_badge"),
 
                     ui.input_select(
                         "decomp_method",
@@ -224,20 +215,8 @@ def multivariate_analysis_ui():
                         max=2000
                     ),
 
-                    ui.input_text(
-                        "decomp_n_assets",
-                        "Top Volume",
-                        value="50",
-                        placeholder="e.g. 50",
-                        update_on="blur"
-                    ),
-
-                    ui.input_selectize(
-                        "decomp_symbols",
-                        "Select Symbols",
-                        choices=[],
-                        multiple=True
-                    )
+                    ui.hr(class_="mt-2 mb-2"),
+                    ui.p("Assets are managed globally in the ASSET FILTER tab.", class_="text-muted small")
                 ),
                 ui.output_ui("decomp_view")
             )
@@ -245,7 +224,7 @@ def multivariate_analysis_ui():
     )
 
 
-def multivariate_analysis_server(input, output, session):
+def multivariate_analysis_server(input, output, session, global_universe):
 
     manager = get_manager()
     correlation_matrix = reactive.Value(pd.DataFrame())
@@ -255,6 +234,48 @@ def multivariate_analysis_server(input, output, session):
     selected_symbols_corr = reactive.Value(set())
     selected_symbols_decomp = reactive.Value(set())
 
+    @reactive.effect
+    @reactive.event(global_universe)
+    def _sync_multivariate_from_global():
+        syms = global_universe.get()
+        if syms:
+            clean_syms = [s for s in syms if s not in IGNORED_CRYPTO]
+            selected_symbols_corr.set(set(clean_syms))
+            selected_symbols_decomp.set(set(clean_syms))
+            
+            sorted_syms = sorted(clean_syms)
+            curr_focus = input.focus_corr_symbol()
+            new_focus = curr_focus if (curr_focus and curr_focus in sorted_syms) else (sorted_syms[0] if sorted_syms else "")
+            ui.update_selectize("focus_corr_symbol", choices=[""] + sorted_syms, selected=new_focus)
+
+    @render.ui
+    def corr_universe_badge():
+        syms = selected_symbols_corr.get() or set(global_universe.get() or [])
+        count = len(syms) if syms else 0
+        return ui.div(
+            ui.span(
+                fa.icon_svg("globe"),
+                f"Global: {count} assets",
+                class_="badge bg-info text-dark px-3 py-1 d-inline-flex align-items-center justify-content-center gap-1 font-monospace shadow-sm",
+                style="font-size: 0.8rem; letter-spacing: 0.5px;"
+            ),
+            class_="d-flex justify-content-center w-100 my-2 text-center"
+        )
+
+    @render.ui
+    def decomp_universe_badge():
+        syms = selected_symbols_decomp.get() or set(global_universe.get() or [])
+        count = len(syms) if syms else 0
+        return ui.div(
+            ui.span(
+                fa.icon_svg("globe"),
+                f"Global: {count} assets",
+                class_="badge bg-info text-dark px-3 py-1 d-inline-flex align-items-center justify-content-center gap-1 font-monospace shadow-sm",
+                style="font-size: 0.8rem; letter-spacing: 0.5px;"
+            ),
+            class_="d-flex justify-content-center w-100 my-2 text-center"
+        )
+
     # ── Shared inventory updates ──────────────────────────────
 
     @reactive.effect
@@ -262,79 +283,6 @@ def multivariate_analysis_server(input, output, session):
     def _update_interval_choices():
         ui.update_select("corr_interval", choices=AVAILABLE_INTERVALS, selected=input.corr_interval())
         ui.update_select("decomp_interval", choices=AVAILABLE_INTERVALS, selected=input.decomp_interval())
-
-    @reactive.effect
-    @reactive.event(input.n_assets)
-    def _update_corr_symbols_list():
-        try:
-            val = input.n_assets()
-            if not val: return
-            n = int(val)
-            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
-            new_syms = set(MANDATORY_CRYPTO).union(syms)
-            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
-            selected_symbols_corr.set(new_syms)
-            
-            all_syms = manager.get_universe()
-            ui.update_selectize("corr_symbols", choices=all_syms, selected=sorted(list(new_syms)))
-        except:
-            pass
-
-    @reactive.effect
-    @reactive.event(input.decomp_n_assets)
-    def _update_decomp_symbols_list():
-        try:
-            val = input.decomp_n_assets()
-            if not val: return
-            n = int(val)
-            syms = manager.fetcher.get_top_volume_symbols(top_n=n)
-            new_syms = set(MANDATORY_CRYPTO).union(syms)
-            new_syms = {s for s in new_syms if s not in IGNORED_CRYPTO}
-            selected_symbols_decomp.set(new_syms)
-            
-            all_syms = manager.get_universe()
-            ui.update_selectize("decomp_symbols", choices=all_syms, selected=sorted(list(new_syms)))
-        except:
-            pass
-            
-    # Trigger population on tab switch (if the nav ID is 'main_nav')
-    # This ensures symbols are ready when user enters the tab
-    @reactive.effect
-    def _populate_on_tab():
-        # Listen to parent nav if available
-        try:
-            current_nav = input.main_nav()
-            if current_nav == "MULTIVARIATE":
-                # Trigger both updates if they are uninitialized or just refresh
-                _update_corr_symbols_list()
-                _update_decomp_symbols_list()
-        except:
-            pass
-
-    @reactive.effect
-    @reactive.event(input.btn_gen_corr, input.btn_run_decomp)
-    def _initialize_selections():
-        # This fallback is now less necessary but kept for safety
-        if not selected_symbols_corr.get():
-            selected_symbols_corr.set(set(MANDATORY_CRYPTO))
-        if not selected_symbols_decomp.get():
-            selected_symbols_decomp.set(set(MANDATORY_CRYPTO))
-
-    @reactive.effect
-    @reactive.event(input.corr_interval, input.decomp_interval)
-    def _update_symbol_choices():
-        # Preserving selection while refreshing universe choices
-        with ui.Progress(min=0, max=1) as p:
-            p.set(0, message="Scanning Market for Assets...")
-            all_syms = manager.get_universe()
-            p.set(1, message="Finalizing Selection...")
-        
-        curr_sel_corr = sorted(list(selected_symbols_corr.get()))
-        ui.update_selectize("corr_symbols", choices=all_syms, selected=curr_sel_corr)
-        ui.update_selectize("focus_corr_symbol", choices=[""] + curr_sel_corr)
-        
-        curr_sel_decomp = sorted(list(selected_symbols_decomp.get()))
-        ui.update_selectize("decomp_symbols", choices=all_syms, selected=curr_sel_decomp)
         
     # ── Helper: load return data ──────────────────────────────
 
@@ -390,32 +338,27 @@ def multivariate_analysis_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_gen_corr)
     def _handle_corr_sync():
-        # Move symbol population back inside the gated button trigger
-        try:
-            n = int(input.n_assets() or 20)
-        except:
-            n = 20
-            
         interval = input.corr_interval()
         if not interval: return
         
         with ui.Progress(min=0, max=100) as p:
-            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
-            try:
-                top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
-            except requests.exceptions.HTTPError as e:
-                ui.notification_show(f"Market Fetch Error: {e.response.status_code}", type="error")
-                top_syms = [] # Fallback to empty, will use MANDATORY_CRYPTO
-            except Exception as e:
-                ui.notification_show(f"Unexpected Error: {str(e)}", type="error")
-                top_syms = []
+            p.set(5, message="Refreshing symbols...")
+            g_syms = global_universe.get()
+            if g_syms:
+                syms = sorted([s for s in g_syms if s not in IGNORED_CRYPTO])
+            else:
+                try:
+                    res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": 50})
+                    syms = res.json()["symbols"] if res.status_code == 200 else []
+                except Exception as e:
+                    ui.notification_show(f"Market Data Error: {str(e)}", type="error")
+                    syms = []
+                syms = sorted([s for s in syms if s not in IGNORED_CRYPTO])
 
-            syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
-            syms = [s for s in syms if s not in IGNORED_CRYPTO]
             selected_symbols_corr.set(set(syms))
-            
-            all_syms = manager.get_universe()
-            ui.update_selectize("corr_symbols", choices=all_syms, selected=syms)
+            curr_focus = input.focus_corr_symbol()
+            new_focus = curr_focus if (curr_focus and curr_focus in syms) else (syms[0] if syms else "")
+            ui.update_selectize("focus_corr_symbol", choices=[""] + syms, selected=new_focus)
 
             p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
             with ThreadPoolExecutor(max_workers=10) as executor:
@@ -433,10 +376,11 @@ def multivariate_analysis_server(input, output, session):
     def _():
         interval = input.corr_interval()
         structure = input.dependence_structure()
-        syms = list(input.corr_symbols())
+        syms = list(selected_symbols_corr.get() or global_universe.get() or [])
+        syms = [s for s in syms if s not in IGNORED_CRYPTO]
 
         if not syms:
-            ui.notification_show("Please select at least one symbol", type="warning")
+            ui.notification_show("Please select at least one symbol in ASSET FILTER", type="warning")
             return
 
         with ui.Progress(min=0, max=100) as p:
@@ -676,32 +620,24 @@ def multivariate_analysis_server(input, output, session):
     @reactive.effect
     @reactive.event(input.btn_run_decomp)
     def _handle_decomp_sync():
-        try:
-            n = int(input.decomp_n_assets() or 20)
-        except:
-            n = 20
-            
         interval = input.decomp_interval()
         if not interval: return
         
         with ui.Progress(min=0, max=100) as p:
-            p.set(5, message="Refreshing symbols...", detail=f"Fetching top {n} assets")
-            try:
-                top_syms = manager.fetcher.get_top_volume_symbols(top_n=n)
-            except requests.exceptions.HTTPError as e:
-                ui.notification_show(f"Market Fetch Error: {e.response.status_code}", type="error")
-                top_syms = []
-            except Exception as e:
-                ui.notification_show(f"Unexpected Error: {str(e)}", type="error")
-                top_syms = []
+            p.set(5, message="Refreshing symbols...")
+            g_syms = global_universe.get()
+            if g_syms:
+                syms = sorted([s for s in g_syms if s not in IGNORED_CRYPTO])
+            else:
+                try:
+                    res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": 50})
+                    syms = res.json()["symbols"] if res.status_code == 200 else []
+                except Exception as e:
+                    ui.notification_show(f"Market Data Error: {str(e)}", type="error")
+                    syms = []
+                syms = sorted([s for s in syms if s not in IGNORED_CRYPTO])
 
-            syms = sorted(list(set(MANDATORY_CRYPTO).union(top_syms)))
-            syms = [s for s in syms if s not in IGNORED_CRYPTO]
             selected_symbols_decomp.set(set(syms))
-            
-            # Use universe for choices
-            all_syms = manager.get_universe()
-            ui.update_selectize("decomp_symbols", choices=all_syms, selected=syms)
 
             p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
             with ThreadPoolExecutor(max_workers=10) as executor:
@@ -720,10 +656,11 @@ def multivariate_analysis_server(input, output, session):
         interval = input.decomp_interval()
         method = input.decomp_method()
         window = input.decomp_window()
-        syms = list(input.decomp_symbols())
+        syms = list(selected_symbols_decomp.get() or global_universe.get() or [])
+        syms = [s for s in syms if s not in IGNORED_CRYPTO]
 
         if not syms:
-            ui.notification_show("Please select at least one symbol", type="warning")
+            ui.notification_show("Please select at least one symbol in ASSET FILTER", type="warning")
             return
 
         with ui.Progress(min=0, max=100) as p:

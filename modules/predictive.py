@@ -395,7 +395,7 @@ def predictive_ui():
         , id="main_navset")
     )
 
-def predictive_server(input, output, session):
+def predictive_server(input, output, session, global_universe):
     manager = get_manager()
     engine = get_engine()
     
@@ -740,11 +740,19 @@ def predictive_server(input, output, session):
         return fig
 
     @reactive.effect
-    def _():
-        with ui.Progress(min=0, max=1) as p:
-            p.set(0, message="Loading Predictive Universe...")
+    @reactive.event(global_universe)
+    def _sync_predictive_from_global():
+        syms = global_universe.get()
+        if syms:
+            inventory.set(syms)
+
+    @reactive.effect
+    def _load_predictive_inventory():
+        g_syms = global_universe.get()
+        if g_syms:
+            inventory.set(g_syms)
+        else:
             uni = manager.get_universe()
-            p.set(1, message="Ready.")
             inventory.set(uni)
 
     @render.ui
@@ -753,7 +761,8 @@ def predictive_server(input, output, session):
         if not uni: 
             return ui.div(ui.p("Loading symbol universe...", class_="text-info small mt-2"))
         
-        return ui.input_select("selected_ticker", "Symbol", choices=uni, selected='BTCUSDT')
+        sel = 'BTCUSDT' if 'BTCUSDT' in uni else (uni[0] if uni else None)
+        return ui.input_select("selected_ticker", "Symbol", choices=uni, selected=sel)
 
     @reactive.effect
     def _():
