@@ -246,6 +246,9 @@ class MetricsEngine:
         max_warmup = w_slow * 2
         if should_calc('rel_strength_z'):
             max_warmup = max(max_warmup, 120)
+        mr_metrics = {'mr_prob', 'price_z', 'adf_prob', 'div_prob', 'slope_prob', 'vol_prob', 'vol_ratio'}
+        if any(should_calc(m) for m in mr_metrics):
+            max_warmup = max(max_warmup, 1000)
             
         if tail_only and len(df) > max_warmup:
             # Keep enough history to warm up EMAs and rolling windows
@@ -410,8 +413,9 @@ class MetricsEngine:
                 beta_series = cov / var
                 res['beta_btc'] = beta_series.reindex(df.index).ffill()
                 
-        if should_calc('mr_prob'):
-            # --- PineScript Parameters ---
+        mr_metrics = {'mr_prob', 'price_z', 'adf_prob', 'div_prob', 'slope_prob', 'vol_prob', 'vol_ratio'}
+        if any(should_calc(m) for m in mr_metrics):
+            # --- PineScript Parameters (Mean Rev Regime Probability) ---
             lookback = 100
             priceZLookback = 50
             adfEmaLen = 10
@@ -436,7 +440,7 @@ class MetricsEngine:
             baseProb = 0.50
             modelScale = 1.0
             zClamp = 4.0
-            # ---------------------------
+            # -----------------------------------------------------------
             
             n = lookback - 1
             dy = close.diff()
@@ -456,25 +460,40 @@ class MetricsEngine:
             
             fast = adf.ewm(span=adfEmaLen, adjust=False).mean()
             slow = fast.rolling(adfSlowLen).mean()
+            
             divergence = fast - slow
             divMean = divergence.rolling(divNormLen).mean()
-            divStd = divergence.rolling(divNormLen).std(ddof=0)
+            divStd = divergence.rolling(divNormLen).std(ddof=1)
             divZ = np.where(divStd > 1e-10, (divergence - divMean) / divStd, 0.0)
             
             divSlope = divergence.diff()
             slopeMean = divSlope.rolling(slopeNormLen).mean()
-            slopeStd = divSlope.rolling(slopeNormLen).std(ddof=0)
+            slopeStd = divSlope.rolling(slopeNormLen).std(ddof=1)
             slopeZ = np.where(slopeStd > 1e-10, (divSlope - slopeMean) / slopeStd, 0.0)
             
-            adfStd = adf.rolling(adfNormLen).std(ddof=0)
+            adfStd = adf.rolling(adfNormLen).std(ddof=1)
             adfZ = np.where(adfStd > 1e-10, (crit - adf) / adfStd, 0.0)
             
-            atrShort = close.diff().abs().rolling(volShortLen).mean()
-            atrLong = close.diff().abs().rolling(volLongLen).mean()
+            # True Range: max(high - low, abs(high - close[1]), abs(low - close[1]))
+            prev_close = close.shift(1)
+            tr = pd.concat([
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs()
+            ], axis=1).max(axis=1)
+            
+            # ta.atr via Wilder's RMA (alpha = 1 / length)
+            atrShort = tr.ewm(alpha=1.0 / volShortLen, adjust=False).mean()
+            atrLong = tr.ewm(alpha=1.0 / volLongLen, adjust=False).mean()
+            
             volRatio = np.where(atrLong > 0, atrShort / atrLong, 1.0)
             logVolRatio = pd.Series(np.where(volRatio > 0, np.log(volRatio), 0.0), index=close.index)
-            volStd = logVolRatio.rolling(volNormLen).std(ddof=0)
+            volStd = logVolRatio.rolling(volNormLen).std(ddof=1)
             volZ = np.where(volStd > 1e-10, logVolRatio / volStd, 0.0)
+            
+            priceMean = close.rolling(priceZLookback).mean()
+            priceStd = close.rolling(priceZLookback).std(ddof=1)
+            priceZ = np.where(priceStd > 0, (close - priceMean) / priceStd, 0.0)
             
             adfScore = np.clip(adfZ, -zClamp, zClamp)
             divScore = np.clip(-divZ, -zClamp, zClamp)
@@ -486,12 +505,24 @@ class MetricsEngine:
             slopeLogit = slopeSensitivity * slopeScore
             volLogit = volSensitivity * volScore
             
+            adfProb = np.where(adfLogit >= 0, 1.0 / (1.0 + np.exp(-adfLogit)), np.exp(adfLogit) / (1.0 + np.exp(adfLogit)))
+            divProb = np.where(divLogit >= 0, 1.0 / (1.0 + np.exp(-divLogit)), np.exp(divLogit) / (1.0 + np.exp(divLogit)))
+            slopeProb = np.where(slopeLogit >= 0, 1.0 / (1.0 + np.exp(-slopeLogit)), np.exp(slopeLogit) / (1.0 + np.exp(slopeLogit)))
+            volProb = np.where(volLogit >= 0, 1.0 / (1.0 + np.exp(-volLogit)), np.exp(volLogit) / (1.0 + np.exp(volLogit)))
+            
             weightSum = adfWeight + divWeight + slopeWeight + volWeight
             weightedLogit = np.where(weightSum > 0, (adfWeight * adfLogit + divWeight * divLogit + slopeWeight * slopeLogit + volWeight * volLogit) / weightSum, 0.0)
             
             modelLogit = np.log(baseProb / (1.0 - baseProb)) + modelScale * weightedLogit
             mrProbability = np.where(modelLogit >= 0, 1.0 / (1.0 + np.exp(-modelLogit)), np.exp(modelLogit) / (1.0 + np.exp(modelLogit)))
-            res['mr_prob'] = pd.Series(mrProbability * 100.0, index=close.index)
+            
+            if should_calc('mr_prob'): res['mr_prob'] = pd.Series(mrProbability * 100.0, index=close.index)
+            if should_calc('price_z'): res['price_z'] = pd.Series(priceZ, index=close.index)
+            if should_calc('adf_prob'): res['adf_prob'] = pd.Series(adfProb * 100.0, index=close.index)
+            if should_calc('div_prob'): res['div_prob'] = pd.Series(divProb * 100.0, index=close.index)
+            if should_calc('slope_prob'): res['slope_prob'] = pd.Series(slopeProb * 100.0, index=close.index)
+            if should_calc('vol_prob'): res['vol_prob'] = pd.Series(volProb * 100.0, index=close.index)
+            if should_calc('vol_ratio'): res['vol_ratio'] = pd.Series(volRatio, index=close.index)
         
         # 228. FIP (Frog-in-the-Pan)
         if should_calc('fip'):

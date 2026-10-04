@@ -99,38 +99,43 @@ def portfolio_allocation_server(input, output, session, global_universe):
     manual_mu = reactive.Value({})
     manual_vol = reactive.Value({})
     
+    has_init_pa = False
+
     @reactive.effect
-    @reactive.event(global_universe)
+    @reactive.event(global_universe, ignore_init=True)
     def _sync_pa_from_global():
         syms = global_universe.get()
         if syms:
-            curr_sel = [s for s in list(input.pa_symbols() or []) if s in syms]
-            if not curr_sel:
-                curr_sel = syms[:10]
-            ui.update_selectize("pa_symbols", choices=syms, selected=curr_sel, server=True)
+            with reactive.isolate():
+                curr_sel = [s for s in list(input.pa_symbols() or []) if s in syms]
+                if not curr_sel:
+                    curr_sel = syms[:10]
+            ui.update_selectize("pa_symbols", choices=syms, selected=curr_sel)
 
     @reactive.Effect
     def _populate_pa_symbols():
+        nonlocal has_init_pa
+        if has_init_pa:
+            return
+        has_init_pa = True
         try:
-            if input.main_nav() == "PORTFOLIO_ALLOCATION":
+            with reactive.isolate():
                 g_syms = global_universe.get()
                 if g_syms:
                     all_syms = sorted(list(set(g_syms).union(MANDATORY_CRYPTO)))
                 else:
-                    res = requests.get(f"{API_BASE_URL}/data/metadata")
-                    if res.status_code == 200:
-                        metadata = res.json().get("metadata", [])
-                        cached_syms = list(set([m["ticker"] for m in metadata if m["ticker"].endswith("USDT") and m["ticker"] not in IGNORED_CRYPTO]))
-                    else:
-                        cached_syms = []
-                    all_syms = sorted(list(set(cached_syms).union(MANDATORY_CRYPTO)))
+                    try:
+                        res = requests.get(f"{API_BASE_URL}/data/universe")
+                        all_syms = res.json()["symbols"] if res.status_code == 200 else []
+                    except Exception:
+                        all_syms = []
+                    all_syms = sorted(list(set(all_syms).union(MANDATORY_CRYPTO)))
                 
-                with reactive.isolate():
-                    curr_sel = list(input.pa_symbols())
-                    if not curr_sel:
-                        curr_sel = all_syms[:10]
+                curr_sel = list(input.pa_symbols() or [])
+                if not curr_sel:
+                    curr_sel = all_syms[:10]
                 
-                ui.update_selectize("pa_symbols", choices=all_syms, selected=curr_sel, server=True)
+                ui.update_selectize("pa_symbols", choices=all_syms, selected=curr_sel)
         except Exception as e:
             logger.log("Portfolio", "ERROR", f"Failed to populate symbols: {e}")
 

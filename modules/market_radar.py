@@ -250,89 +250,14 @@ def market_radar_server(input, output, session, global_interval, global_universe
             selected_symbols_radar.set(set(clean_syms))
             selected_symbols_rpg.set(set(clean_syms))
             curr_sel = sorted(list(clean_syms))
-            ui.update_selectize("radar_symbols", choices=curr_sel, selected=curr_sel)
-            ui.update_selectize("rpg_symbols", choices=curr_sel, selected=curr_sel)
             
-            curr_focus = input.focus_symbol()
+            with reactive.isolate():
+                curr_focus = input.focus_symbol()
+                curr_rpg_focus = input.rpg_focus_symbol()
             new_focus = curr_focus if (curr_focus and curr_focus in curr_sel) else (curr_sel[0] if curr_sel else "")
+            new_rpg_focus = curr_rpg_focus if (curr_rpg_focus and curr_rpg_focus in curr_sel) else (curr_sel[0] if curr_sel else "")
             ui.update_selectize("focus_symbol", choices=curr_sel, selected=new_focus)
-            ui.update_selectize("rpg_focus_symbol", choices=curr_sel, selected=new_focus)
-
-    @reactive.effect
-    @reactive.event(input.btn_calc_snapshot)
-    def _initialize_symbols():
-        if not selected_symbols_radar.get():
-            syms = global_universe.get()
-            clean_syms = [s for s in syms if s not in IGNORED_CRYPTO]
-            selected_symbols_radar.set(set(clean_syms))
-
-    @reactive.effect
-    @reactive.event(input.btn_gen_rpg)
-    def _initialize_rpg_symbols():
-        if not selected_symbols_rpg.get():
-            syms = global_universe.get()
-            clean_syms = [s for s in syms if s not in IGNORED_CRYPTO]
-            selected_symbols_rpg.set(set(clean_syms))
-
-    @reactive.effect
-    @reactive.event(input.radar_interval, ignore_init=True)
-    def _update_symbol_choices():
-        curr_sel = sorted(list(selected_symbols_radar.get()))
-        ui.update_selectize("radar_symbols", choices=curr_sel, selected=curr_sel)
-        curr_focus = input.focus_symbol()
-        new_focus = curr_focus if (curr_focus and curr_focus in curr_sel) else (curr_sel[0] if curr_sel else "")
-        ui.update_selectize("focus_symbol", choices=curr_sel, selected=new_focus)
-        ui.update_selectize("rpg_focus_symbol", choices=curr_sel, selected=new_focus)
-
-    @reactive.effect
-    @reactive.event(input.btn_calc_snapshot)
-    def _handle_radar_sync():
-        with ui.Progress(min=0, max=100) as p:
-            p.set(5, message="Refreshing symbols...")
-            g_syms = global_universe.get()
-            if g_syms:
-                syms = sorted([s for s in g_syms if s not in IGNORED_CRYPTO])
-            else:
-                try:
-                    res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": 50})
-                    syms = res.json()["symbols"] if res.status_code == 200 else []
-                except Exception as e:
-                    ui.notification_show(f"Market Data Error: {str(e)}", type="error")
-                    syms = []
-                syms = sorted([s for s in syms if s not in IGNORED_CRYPTO])
-            
-            selected_symbols_radar.set(set(syms))
-            ui.update_selectize("radar_symbols", choices=syms, selected=syms)
-            curr_focus = input.focus_symbol()
-            new_focus = curr_focus if (curr_focus and curr_focus in syms) else (syms[0] if syms else "")
-            ui.update_selectize("focus_symbol", choices=syms, selected=new_focus)
-            ui.update_selectize("rpg_focus_symbol", choices=syms, selected=new_focus)
-            p.set(100, message="Sync complete")
-
-    @reactive.effect
-    @reactive.event(input.btn_gen_rpg)
-    def _handle_rpg_sync():
-        with ui.Progress(min=0, max=100) as p:
-            p.set(5, message="Refreshing symbols...")
-            g_syms = global_universe.get()
-            if g_syms:
-                syms = sorted([s for s in g_syms if s not in IGNORED_CRYPTO])
-            else:
-                try:
-                    res = requests.get(f"{API_BASE_URL}/data/universe", params={"top_n": 20})
-                    syms = res.json()["symbols"] if res.status_code == 200 else []
-                except Exception as e:
-                    ui.notification_show(f"Path Analysis Error: {str(e)}", type="error")
-                    syms = []
-                syms = sorted([s for s in syms if s not in IGNORED_CRYPTO])
-            selected_symbols_rpg.set(set(syms))
-            ui.update_selectize("rpg_symbols", choices=syms, selected=syms)
-            curr_focus = input.rpg_focus_symbol()
-            new_focus = curr_focus if (curr_focus and curr_focus in syms) else (syms[0] if syms else "")
-            ui.update_selectize("rpg_focus_symbol", choices=syms, selected=new_focus)
-            ui.update_selectize("focus_symbol", choices=syms, selected=new_focus)
-            p.set(100, message="Sync complete")
-
+            ui.update_selectize("rpg_focus_symbol", choices=curr_sel, selected=new_rpg_focus)
 
     @reactive.effect
     def _sync_focus_symbol():
@@ -354,15 +279,13 @@ def market_radar_server(input, output, session, global_interval, global_universe
             interval = input.radar_interval()
             logger.log("Market Radar", "INFO", f"Using interval: {interval}")
             
-            symbols = list(input.radar_symbols() or [])
-            if not symbols:
-                sym_list = list(selected_symbols_radar.get() or MANDATORY_CRYPTO)
-                symbols = sorted(sym_list)
-                symbols = [s for s in symbols if s not in IGNORED_CRYPTO]
+            with reactive.isolate():
+                syms = list(selected_symbols_radar.get() or global_universe.get() or MANDATORY_CRYPTO)
+            symbols = sorted([s for s in syms if s not in IGNORED_CRYPTO])
             logger.log("Market Radar", "INFO", f"Calculating metrics for {len(symbols)} symbols")
             
             if not symbols:
-                ui.notification_show("Please select symbols for analysis.", type="warning")
+                ui.notification_show("Please select symbols for analysis in Asset Filter.", type="warning")
                 return
 
             with ui.Progress(min=0, max=100) as p:
@@ -377,13 +300,13 @@ def market_radar_server(input, output, session, global_interval, global_universe
                 try:
                     res = requests.post(f"{API_BASE_URL}/market-radar/snapshot", json=payload)
                     if res.status_code == 200:
-                        results = res.json()["metrics"]
+                        results = res.json().get("metrics", [])
                         if not results:
                             ui.notification_show("Failed to compute metrics for any symbols.", type="error")
                             return
                         res_df = pd.DataFrame(results)
                         snapshot_data.set(res_df)
-                        ui.notification_show("Market Snapshot updated!", type="success")
+                        ui.notification_show(f"Market Snapshot updated for {len(res_df)} assets!", type="success")
                     else:
                         ui.notification_show(f"Calculation error: {res.text}", type="error")
                 except Exception as e:
@@ -763,9 +686,11 @@ def market_radar_server(input, output, session, global_interval, global_universe
         logger.log("Market Radar", "INFO", "RPG calculation triggered")
         try:
             interval = input.rpg_interval()
-            compare_symbols = list(input.rpg_symbols())
+            with reactive.isolate():
+                syms = list(selected_symbols_rpg.get() or global_universe.get() or MANDATORY_CRYPTO)
+            compare_symbols = sorted([s for s in syms if s not in IGNORED_CRYPTO])
             if not compare_symbols:
-                ui.notification_show("Select symbols to compare", type="error")
+                ui.notification_show("Select symbols in Asset Filter to compare", type="error")
                 return
             
             logger.log("Market Radar", "INFO", f"Comparing {len(compare_symbols)} symbols: {compare_symbols}")

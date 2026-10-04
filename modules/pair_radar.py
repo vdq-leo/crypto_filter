@@ -158,13 +158,16 @@ def pair_radar_server(input, output, session, global_interval, global_universe):
         await asyncio.sleep(0.5)
         copula_trigger.set(copula_trigger.get() + 1)
 
+    has_init_pair = False
+
     @reactive.effect
-    @reactive.event(global_universe)
+    @reactive.event(global_universe, ignore_init=True)
     def _sync_pair_from_global():
         syms = global_universe.get()
         if syms:
-            curr_a = input.symbol_a() if "symbol_a" in input else "BTCUSDT"
-            curr_b = input.symbol_b() if "symbol_b" in input else "ETHUSDT"
+            with reactive.isolate():
+                curr_a = input.symbol_a() if "symbol_a" in input else "BTCUSDT"
+                curr_b = input.symbol_b() if "symbol_b" in input else "ETHUSDT"
             sel_a = curr_a if curr_a in syms else syms[0]
             sel_b = curr_b if curr_b in syms else (syms[1] if len(syms) > 1 else syms[0])
             ui.update_selectize("symbol_a", choices=syms, selected=sel_a)
@@ -172,8 +175,13 @@ def pair_radar_server(input, output, session, global_interval, global_universe):
 
     @reactive.effect
     def populate_selectors():
-        g_syms = global_universe.get()
-        all_syms = g_syms if g_syms else manager.get_universe()
+        nonlocal has_init_pair
+        if has_init_pair:
+            return
+        has_init_pair = True
+        with reactive.isolate():
+            g_syms = global_universe.get()
+            all_syms = g_syms if g_syms else manager.get_universe()
         sel_a = "BTCUSDT" if "BTCUSDT" in all_syms else (all_syms[0] if all_syms else None)
         sel_b = "ETHUSDT" if "ETHUSDT" in all_syms else (all_syms[1] if len(all_syms) > 1 else sel_a)
         ui.update_selectize("symbol_a", choices=all_syms, selected=sel_a)

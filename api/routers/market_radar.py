@@ -49,7 +49,7 @@ def get_market_snapshot(req: SnapshotRequest):
             try:
                 df = manager.load_data(sym, req.interval, auto_sync=True)
                 if df is not None and not df.empty:
-                    df = df.tail(req.filter_window * 5)
+                    df = df.tail(max(req.filter_window * 5, 1000))
                     if not df.empty:
                         return engine.compute_all_metrics(
                             {sym: df}, 

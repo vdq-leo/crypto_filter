@@ -235,7 +235,7 @@ def multivariate_analysis_server(input, output, session, global_universe):
     selected_symbols_decomp = reactive.Value(set())
 
     @reactive.effect
-    @reactive.event(global_universe)
+    @reactive.event(global_universe, ignore_init=True)
     def _sync_multivariate_from_global():
         syms = global_universe.get()
         if syms:
@@ -244,7 +244,8 @@ def multivariate_analysis_server(input, output, session, global_universe):
             selected_symbols_decomp.set(set(clean_syms))
             
             sorted_syms = sorted(clean_syms)
-            curr_focus = input.focus_corr_symbol()
+            with reactive.isolate():
+                curr_focus = input.focus_corr_symbol()
             new_focus = curr_focus if (curr_focus and curr_focus in sorted_syms) else (sorted_syms[0] if sorted_syms else "")
             ui.update_selectize("focus_corr_symbol", choices=[""] + sorted_syms, selected=new_focus)
 

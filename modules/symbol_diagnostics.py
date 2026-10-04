@@ -197,39 +197,56 @@ def symbol_diagnostics_server(input, output, session, global_interval, global_un
             pass
         return {"oldest": "-", "latest": "-"}
     
+    has_init_diag = False
+
     @reactive.effect
-    @reactive.event(global_universe)
+    @reactive.event(global_universe, ignore_init=True)
     def _sync_diag_from_global():
         syms = global_universe.get()
         if syms:
-            curr = input.diag_symbol() if "diag_symbol" in input else "BTCUSDT"
+            with reactive.isolate():
+                curr = input.diag_symbol() if "diag_symbol" in input else "BTCUSDT"
             sel = curr if curr in syms else syms[0]
-            ui.update_selectize("diag_symbol", choices=syms, selected=sel, server=True)
+            ui.update_selectize("diag_symbol", choices=syms, selected=sel)
 
     @reactive.Effect
     def populate_symbols():
-        g_syms = global_universe.get()
-        if g_syms:
-            all_syms = g_syms
-        else:
+        nonlocal has_init_diag
+        if has_init_diag:
+            return
+        has_init_diag = True
+        with reactive.isolate():
+            g_syms = global_universe.get()
+            if g_syms:
+                all_syms = g_syms
+            else:
+                try:
+                    res = requests.get(f"{API_BASE_URL}/data/universe")
+                    all_syms = res.json()["symbols"] if res.status_code == 200 else []
+                except:
+                    all_syms = []
+            sel = "BTCUSDT" if "BTCUSDT" in all_syms else (all_syms[0] if all_syms else None)
+            ui.update_selectize("diag_symbol", choices=all_syms, selected=sel)
+            
             try:
-                res = requests.get(f"{API_BASE_URL}/data/universe")
-                all_syms = res.json()["symbols"] if res.status_code == 200 else []
-            except:
-                all_syms = []
-        sel = "BTCUSDT" if "BTCUSDT" in all_syms else (all_syms[0] if all_syms else None)
-        ui.update_selectize("diag_symbol", choices=all_syms, selected=sel, server=True)
-        
-        # Set benchmark/global timestamps once
-        global_ts = get_timestamps(BENCHMARK_SYMBOL, input.diag_interval())
-        data_info.set({"global": global_ts, "symbol": {"oldest": "-", "latest": "-"}})
+                diag_int = input.diag_interval()
+            except Exception:
+                diag_int = "1h"
+            global_ts = get_timestamps(BENCHMARK_SYMBOL, diag_int)
+            data_info.set({"global": global_ts, "symbol": {"oldest": "-", "latest": "-"}})
     
     @reactive.Effect
-    @reactive.event(input.diag_symbol)
+    @reactive.event(input.diag_symbol, ignore_init=True)
     def update_symbol_ts():
-        if input.diag_symbol():
-            symbol_ts = get_timestamps(input.diag_symbol(), input.diag_interval())
-            current_global = data_info.get().get("global", {"oldest": "-", "latest": "-"})
+        sym = input.diag_symbol()
+        if sym:
+            with reactive.isolate():
+                try:
+                    diag_int = input.diag_interval()
+                except Exception:
+                    diag_int = "1h"
+                current_global = data_info.get().get("global", {"oldest": "-", "latest": "-"})
+            symbol_ts = get_timestamps(sym, diag_int)
             data_info.set({"global": current_global, "symbol": symbol_ts})
     
     @render.ui

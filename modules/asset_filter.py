@@ -198,8 +198,14 @@ def asset_filter_server(*args, **kwargs):
     # Mutable sync state to prevent feedback loops between Table, Selectize, and Global Universe
     sync_state = {"bulk_in_progress": False}
 
+    has_fetched_meta = False
+
     @reactive.effect
     async def _fetch_metadata():
+        nonlocal has_fetched_meta
+        if has_fetched_meta:
+            return
+        has_fetched_meta = True
         try:
             res = requests.get(f"{API_BASE_URL}/data/universe/meta", timeout=10)
             if res.status_code == 200:
@@ -211,7 +217,9 @@ def asset_filter_server(*args, **kwargs):
                 meta_store.set(data.get("symbol_meta", {}))
                 ui.update_selectize("asset_filter_types", choices=t_list, session=session)
                 ui.update_selectize("asset_filter_subtypes", choices=st_list, session=session)
-                if filtered_df.get().empty:
+                with reactive.isolate():
+                    is_empty = filtered_df.get().empty
+                if is_empty:
                     await do_fetch()
         except Exception as e:
             logger.error(f"Failed to fetch universe meta: {e}")
@@ -411,7 +419,7 @@ def asset_filter_server(*args, **kwargs):
 
     # Sync Select Box (selectize) changes to Table and global_universe
     @reactive.effect
-    @reactive.event(input.asset_filter_selected_symbols)
+    @reactive.event(input.asset_filter_selected_symbols, ignore_init=True)
     async def _on_selectize_change():
         if sync_state["bulk_in_progress"]:
             return

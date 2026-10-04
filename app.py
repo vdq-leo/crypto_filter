@@ -156,33 +156,38 @@ def server(input, output, session):
             pass
         return {"oldest": "-", "latest": "-"}
     
+    has_init_app = False
+
     @reactive.Effect
     def populate_symbols():
-        if global_universe.get():
+        nonlocal has_init_app
+        if has_init_app:
             return
-        try:
-            res = requests.get(f"{API_BASE_URL}/data/universe")
-            all_syms = res.json()["symbols"] if res.status_code == 200 else []
-        except:
-            all_syms = []
-        if all_syms and not global_universe.get():
-            global_universe.set(all_syms)
-        ui.update_selectize("quick_symbol", choices=all_syms, server=True)
+        has_init_app = True
+        with reactive.isolate():
+            current_u = global_universe.get()
+            if not current_u:
+                try:
+                    res = requests.get(f"{API_BASE_URL}/data/universe")
+                    all_syms = res.json()["symbols"] if res.status_code == 200 else []
+                except:
+                    all_syms = []
+                if all_syms:
+                    global_universe.set(all_syms)
+            else:
+                all_syms = current_u
+            ui.update_selectize("quick_symbol", choices=all_syms)
+            
+            # Fetch benchmark/global timestamps once on startup
+            global_ts = get_timestamps(BENCHMARK_SYMBOL, "1h")
+            data_info.set({"global": global_ts})
 
     @reactive.effect
-    @reactive.event(global_universe)
+    @reactive.event(global_universe, ignore_init=True)
     def _sync_navbar_quick_symbol():
         syms = global_universe.get()
         if syms:
-            ui.update_selectize("quick_symbol", choices=syms, server=True)
-
-        # Set benchmark/global timestamps once
-        try:
-            interval_val = input.diag_interval()
-        except:
-            interval_val = "1h"
-        global_ts = get_timestamps(BENCHMARK_SYMBOL, interval_val)
-        data_info.set({"global": global_ts})
+            ui.update_selectize("quick_symbol", choices=syms)
     
     @render.ui
     def data_status_():
