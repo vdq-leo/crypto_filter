@@ -79,6 +79,25 @@ def _adaptive_ema_numba(x, alpha):
             a[i] = curr_alpha * x[i] + (1 - curr_alpha) * a[i-1]
     return a
 
+@numba.njit
+def _vama_position_state_numba(long_signals, short_signals):
+    n = len(long_signals)
+    pos = np.zeros(n, dtype=np.int32)
+    long_trig = np.zeros(n, dtype=np.bool_)
+    short_trig = np.zeros(n, dtype=np.bool_)
+    curr_pos = 0
+    for i in range(n):
+        l_trig = long_signals[i] and curr_pos <= 0
+        s_trig = short_signals[i] and curr_pos >= 0
+        if l_trig:
+            curr_pos = 1
+        elif s_trig:
+            curr_pos = -1
+        pos[i] = curr_pos
+        long_trig[i] = l_trig
+        short_trig[i] = s_trig
+    return pos, long_trig, short_trig
+
 class MetricsEngine:
     """Calculates metrics from price data using vectorized operations."""
     TICKER_24H = "/fapi/v1/ticker/24hr"
@@ -217,18 +236,89 @@ class MetricsEngine:
         return (tp * df['volume']).cumsum() / df['volume'].cumsum()
     
     @staticmethod
-    def vama(close: pd.Series, w_short: int = 40, w_slow: int = 120) -> pd.Series:
-        rets = np.log(close / close.shift()).fillna(0)
-        s_std = rets.ewm(span=w_short).std()
-        l_std = rets.ewm(span=w_slow).std()
-        alpha = ((l_std * 0.5) / s_std).clip(lower=0.05, upper=0.95).fillna(0.05)
-        v_alpha = alpha.values
-        v_close = close.values
-        res = np.zeros_like(v_close)
-        res[0] = v_close[0]
-        for i in range(1, len(v_close)):
-            res[i] = v_alpha[i] * v_close[i] + (1 - v_alpha[i]) * res[i-1]
-        return pd.Series(res, index=close.index)
+    def calculate_vama(
+        close: pd.Series, 
+        maMin: int = 50, 
+        period: int = 37, 
+        volFactor: float = 0.17, 
+        longZScore: float = 1.15, 
+        shortZScore: float = 1.45,
+        use_closed_bar: bool = False
+    ) -> Dict[str, pd.Series]:
+        """
+        Calculates VAMA Volatility Expansion metrics matching Pine Script @version=6
+        indicator("VAMA Volatility Expansion", overlay=false).
+        
+        Default parameters match the BTCUSDT preset:
+            maMin=50, period=37, volFactor=0.17, longZScore=1.15, shortZScore=1.45.
+            
+        If use_closed_bar=True, evaluates on close.shift(1) matching Pine Script's
+        request.security(syminfo.tickerid, res, f_vama(close[1])).
+        """
+        src = close.shift(1) if use_closed_bar else close
+        n = len(src)
+        logret = np.log(src / src.shift(1)).fillna(0.0)
+        
+        longPeriod = period * 30
+        
+        # Pine Script f_pop_stdev(src, length) => ta.sma(math.pow(src - ta.sma(src, length), 2), length)
+        def _f_pop_stdev(x: pd.Series, length: int) -> pd.Series:
+            mean = x.rolling(length, min_periods=length).mean()
+            var = ((x - mean) ** 2).rolling(length, min_periods=1).mean()
+            return np.sqrt(var)
+            
+        vol = _f_pop_stdev(logret, period)
+        longVol = _f_pop_stdev(logret, longPeriod)
+        targetVol = longVol * volFactor
+        
+        span = pd.Series(float(maMin), index=src.index)
+        valid_mask = (vol > 0) & targetVol.notna()
+        scale = np.minimum(targetVol[valid_mask] / vol[valid_mask], 1.0)
+        span[valid_mask] = np.maximum(np.floor(maMin / scale), 1.0)
+        
+        alpha = 1.0 / (span + 1.0)
+        alpha_clean = alpha.fillna(1.0 / (float(maMin) + 1.0)).values
+        
+        vama_vals = _adaptive_ema_numba(src.values, alpha_clean)
+        vama = pd.Series(vama_vals, index=src.index)
+        
+        std20 = _f_pop_stdev(logret, 20)
+        currentRet = logret
+        longThreshold = longZScore * std20
+        shortThreshold = shortZScore * std20
+        
+        longSignal = ((src > vama) & (currentRet > longThreshold)).fillna(False).values
+        shortSignal = ((src < vama) & (currentRet < -shortThreshold)).fillna(False).values
+        
+        pos, long_trig, short_trig = _vama_position_state_numba(longSignal, shortSignal)
+        
+        targetWeight = pd.Series(0.0, index=src.index)
+        targetWeight[valid_mask] = np.clip(targetVol[valid_mask] / vol[valid_mask], 0.0, 2.0)
+        
+        vama_dist = (src - vama) / src
+        
+        return {
+            'vama': vama,
+            'vama_dist': vama_dist,
+            'vol': vol,
+            'targetVol': targetVol,
+            'targetWeight': targetWeight,
+            'span': span,
+            'currentRet': currentRet,
+            'longThreshold': longThreshold,
+            'shortThreshold': -shortThreshold, # Pine Script tuple index 7 returns -shortThreshold
+            'shortThresholdAbs': shortThreshold,
+            'longSignal': pd.Series(longSignal, index=src.index),
+            'shortSignal': pd.Series(shortSignal, index=src.index),
+            'signal': pd.Series(np.where(long_trig, 1, np.where(short_trig, -1, 0)), index=src.index),
+            'position': pd.Series(pos, index=src.index)
+        }
+
+    @staticmethod
+    def vama(close: pd.Series, maMin: int = 50, period: int = 37, volFactor: float = 0.17) -> pd.Series:
+        """Returns the VAMA moving average series matching Pine Script @version=6."""
+        res = MetricsEngine.calculate_vama(close, maMin=maMin, period=period, volFactor=volFactor)
+        return res['vama']
 
     @staticmethod
     def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None, tail_only: bool = False) -> pd.DataFrame:
@@ -249,6 +339,9 @@ class MetricsEngine:
         mr_metrics = {'mr_prob', 'price_z', 'adf_prob', 'div_prob', 'slope_prob', 'vol_prob', 'vol_ratio'}
         if any(should_calc(m) for m in mr_metrics):
             max_warmup = max(max_warmup, 1000)
+        vama_metrics = {'vama', 'vama_raw', 'vama_dist', 'vama_weight', 'vama_span', 'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos', 'vama_current_ret', 'vama_long_thr', 'vama_short_thr'}
+        if any(should_calc(m) for m in vama_metrics):
+            max_warmup = max(max_warmup, 2500)
             
         if tail_only and len(df) > max_warmup:
             # Keep enough history to warm up EMAs and rolling windows
@@ -374,9 +467,22 @@ class MetricsEngine:
             rng = (high - low).replace(0, 1e-9)
             res['imbalance_bar'] = (body / rng) * np.sign(close - df['open'])
         
-        # 16. VAMA (Volatility Adjusted Moving Average)
-        if should_calc('vama'):
-            res['vama'] = MetricsEngine.vama(close, w_short, w_slow) / close
+        # 16. VAMA (Volatility Adjusted Moving Average) - Pine Script "VAMA Volatility Expansion" (BTCUSDT params)
+        vama_metrics = {'vama', 'vama_raw', 'vama_dist', 'vama_weight', 'vama_span', 'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos', 'vama_current_ret', 'vama_long_thr', 'vama_short_thr'}
+        if any(should_calc(m) for m in vama_metrics):
+            vama_dict = MetricsEngine.calculate_vama(close, maMin=50, period=37, volFactor=0.17, longZScore=1.15, shortZScore=1.45)
+            if should_calc('vama'): res['vama'] = vama_dict['vama']
+            if should_calc('vama_raw'): res['vama_raw'] = vama_dict['vama']
+            if should_calc('vama_dist'): res['vama_dist'] = vama_dict['vama_dist']
+            if should_calc('vama_weight'): res['vama_weight'] = vama_dict['targetWeight']
+            if should_calc('vama_span'): res['vama_span'] = vama_dict['span']
+            if should_calc('vama_vol'): res['vama_vol'] = vama_dict['vol']
+            if should_calc('vama_target_vol'): res['vama_target_vol'] = vama_dict['targetVol']
+            if should_calc('vama_signal'): res['vama_signal'] = vama_dict['signal']
+            if should_calc('vama_pos'): res['vama_pos'] = vama_dict['position']
+            if should_calc('vama_current_ret'): res['vama_current_ret'] = vama_dict['currentRet']
+            if should_calc('vama_long_thr'): res['vama_long_thr'] = vama_dict['longThreshold']
+            if should_calc('vama_short_thr'): res['vama_short_thr'] = vama_dict['shortThreshold']
         
         # --- Standard/Legacy Metrics for Snapshot/Table use ---
         if should_calc('volatility') or should_calc('vol_atr'):
@@ -749,8 +855,8 @@ class MetricsEngine:
     def calculate_breakout_score(df: pd.DataFrame, 
                                  len_up: int = 30, len_down: int = 30, 
                                  mult_base: float = 0.5, calcMethod: str = "Atr",
-                                 maMin: int = 10, period: int = 50,
-                                 volFactor: float = 0.15, k_decay: float = 2.0, eps: float = 0.2, persistBars: int = 3) -> tuple:
+                                 maMin: int = 50, period: int = 37,
+                                 volFactor: float = 0.17, k_decay: float = 2.0, eps: float = 0.2, persistBars: int = 3) -> tuple:
         """
         Calculates breakout trendline score (translated from Market_radar Numba logic).
         Returns: score_up_dist, score_down_dist, score_up_break, score_down_break

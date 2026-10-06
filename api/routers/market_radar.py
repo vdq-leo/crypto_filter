@@ -70,7 +70,7 @@ def get_market_snapshot(req: SnapshotRequest):
                 # auto_sync=False avoids firing 200 concurrent API requests to Binance
                 df = manager.load_data(sym, req.interval, auto_sync=False)
                 if df is not None and not df.empty:
-                    df = df.tail(max(req.filter_window * 5, 1000))
+                    df = df.tail(max(req.filter_window * 5, 2500))
                     if not df.empty:
                         adv_df = engine.calculate_all_indicators(
                             df, 
