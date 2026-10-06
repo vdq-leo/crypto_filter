@@ -228,7 +228,7 @@ def pair_radar_server(input, output, session, global_interval, global_universe):
             }
             
             try:
-                res = requests.post(f"{API_BASE_URL}/pair_radar/generate", json=payload)
+                res = requests.post(f"{API_BASE_URL}/pair-radar/generate", json=payload)
                 if res.status_code == 200:
                     data = res.json()
                     

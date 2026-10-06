@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from src.data import DataManager
+from src.data import DataManager, BinanceFuturesFetcher
 from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL
 from src.shared_state import get_manager, get_engine
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 manager = get_manager()
 engine = get_engine()
+fetcher = BinanceFuturesFetcher()
 
 class SnapshotRequest(BaseModel):
     symbols: List[str]
@@ -37,7 +38,13 @@ def get_metric_key(m: str) -> str:
 def get_market_snapshot(req: SnapshotRequest):
     """Calculate market radar snapshot metrics for a list of symbols."""
     try:
-        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=True)
+        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=False)
+        if benchmark_df is None or benchmark_df.empty:
+            try:
+                benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=True)
+            except Exception:
+                pass
+
         benchmark_returns = None
         benchmark_prices = None
         if benchmark_df is not None and not benchmark_df.empty:
@@ -45,20 +52,42 @@ def get_market_snapshot(req: SnapshotRequest):
             benchmark_prices = b_close
             benchmark_returns = b_close.pct_change().dropna()
 
+        # Pre-fetch funding rates and ADL risks once safely outside thread loop
+        funding_rates = {}
+        try:
+            funding_rates = fetcher.get_funding_rates()
+        except Exception as e:
+            logger.warning(f"Could not fetch funding rates: {e}")
+
+        adl_risks = {}
+        try:
+            adl_risks = fetcher.get_all_adl_risks()
+        except Exception as e:
+            logger.warning(f"Could not fetch ADL risks: {e}")
+
         def process_symbol(sym):
             try:
-                df = manager.load_data(sym, req.interval, auto_sync=True)
+                # auto_sync=False avoids firing 200 concurrent API requests to Binance
+                df = manager.load_data(sym, req.interval, auto_sync=False)
                 if df is not None and not df.empty:
                     df = df.tail(max(req.filter_window * 5, 1000))
                     if not df.empty:
-                        return engine.compute_all_metrics(
-                            {sym: df}, 
+                        adv_df = engine.calculate_all_indicators(
+                            df, 
+                            window=req.filter_window, 
+                            benchmark_returns=benchmark_returns, 
+                            benchmark_prices=benchmark_prices, 
                             interval=req.interval, 
-                            benchmark_symbol=BENCHMARK_SYMBOL,
-                            benchmark_returns=benchmark_returns,
-                            benchmark_prices=benchmark_prices,
-                            window=req.filter_window
+                            tail_only=True
                         )
+                        row = {
+                            'symbol': sym,
+                            'count': len(df)
+                        }
+                        row.update(adv_df.iloc[-1].to_dict())
+                        row['funding_rate'] = funding_rates.get(sym, np.nan)
+                        row['adl_risk'] = adl_risks.get(sym, np.nan)
+                        return row
             except Exception as e:
                 logger.error(f"Error computing {sym}: {e}")
             return None
@@ -70,22 +99,30 @@ def get_market_snapshot(req: SnapshotRequest):
                 sym = future_to_sym[future]
                 try:
                     single_res = future.result()
-                    if single_res is not None and not single_res.empty:
-                        results.append(single_res.iloc[0].to_dict())
+                    if single_res is not None:
+                        results.append(single_res)
                 except Exception as e:
                     logger.error(f"Future error for {sym}: {e}")
 
-        # Need to clean up NaNs to None for JSON serialization
+        # Need to clean up NaNs/Infs to None for JSON serialization
         cleaned_results = []
         for r in results:
-            clean = {k: (None if pd.isna(v) else v) for k, v in r.items()}
+            clean = {}
+            for k, v in r.items():
+                if isinstance(v, (float, np.floating)):
+                    clean[k] = None if (np.isnan(v) or np.isinf(v)) else float(v)
+                elif isinstance(v, (int, np.integer)):
+                    clean[k] = int(v)
+                elif pd.isna(v):
+                    clean[k] = None
+                else:
+                    clean[k] = v
             cleaned_results.append(clean)
             
         return {"metrics": cleaned_results}
-
     except Exception as e:
-        logger.error(f"Snapshot error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Snapshot error: {e}")
+        return {"metrics": []}
 
 @router.post("/path")
 def get_path_analysis(req: PathRequest):
@@ -95,14 +132,14 @@ def get_path_analysis(req: PathRequest):
         key_y = get_metric_key(req.y_metric)
         required_metrics = list(set([key_x, key_y]))
 
-        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=True)
+        benchmark_df = manager.load_data(BENCHMARK_SYMBOL, req.interval, auto_sync=False)
         benchmark_prices = None
         if benchmark_df is not None and not benchmark_df.empty:
             benchmark_prices = pd.to_numeric(benchmark_df['close'], errors='coerce').ffill().fillna(0)
 
         def process_rpg_symbol(sym):
             try:
-                df = manager.load_data(sym, req.interval, auto_sync=True)
+                df = manager.load_data(sym, req.interval, auto_sync=False)
                 if df is not None and not df.empty:
                     df['close'] = pd.to_numeric(df['close'], errors='coerce').ffill().fillna(0)
                     inds = engine.calculate_all_indicators(

@@ -30,9 +30,19 @@ class FetchRequest(BaseModel):
 def get_universe_meta():
     """Get unique underlying types and subtypes."""
     try:
-        return fetcher.get_universe_metadata()
+        meta = fetcher.get_universe_metadata()
+        if meta and meta.get("types"):
+            return meta
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning(f"Error fetching universe meta from Binance: {e}")
+
+    # Fallback to local cache so the UI never crashes
+    cached_syms = manager.get_cached_symbols()
+    return {
+        "types": ["COIN"],
+        "subtypes": ["-"],
+        "symbol_meta": {s: {"type": "COIN", "subtypes": ["-"]} for s in cached_syms}
+    }
 
 @router.get("/universe")
 def get_universe(
@@ -46,12 +56,28 @@ def get_universe(
         items = fetcher.get_top_volume_symbols_with_meta(top_n=top_n, bottom=bottom, types=types, subtypes=subtypes)
         filtered_items = [item for item in items if item["symbol"] not in IGNORED_CRYPTO]
         symbols = [item["symbol"] for item in filtered_items]
-        return {
-            "symbols": symbols,
-            "items": filtered_items
-        }
+        if symbols:
+            return {
+                "symbols": symbols,
+                "items": filtered_items
+            }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.warning(f"Error fetching live universe: {e}")
+
+    # Fallback: Use locally cached symbols on disk so the user interface never breaks
+    cached_syms = manager.get_cached_symbols()
+    symbols = cached_syms[:top_n] if cached_syms else list(MANDATORY_CRYPTO)[:top_n]
+    filtered_items = [{
+        "symbol": s,
+        "type": "COIN",
+        "subtypes": ["-"],
+        "volume": 0.0,
+        "volume_formatted": "$0"
+    } for s in symbols]
+    return {
+        "symbols": symbols,
+        "items": filtered_items
+    }
 
 @router.get("/klines")
 def get_klines(symbol: str, interval: str = "1h", limit: int = 500):

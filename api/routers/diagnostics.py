@@ -10,7 +10,7 @@ from sklearn.linear_model import LinearRegression
 from src.data import DataManager
 from src.metrics import MetricsEngine
 from src.config import BENCHMARK_SYMBOL, MANDATORY_CRYPTO, IGNORED_CRYPTO
-from src.shared_state import get_manager, get_engine
+from src.shared_state import get_manager, get_engine, sanitize_for_json
 from ml_engine.analysis.multivariate import DecompositionEngine
 from ml_engine.data.bars import construct_volume_bars, construct_dollar_bars, calibrate_bar_threshold
 from ml_engine.labeling.labeler import Labeler
@@ -342,7 +342,7 @@ def generate_bars(req: BarsRequest):
                         "kurtosis": kurtosis(d['ret'].dropna(), fisher=True) if len(d['ret'].dropna()) > 1 else 0
                     }
                 }
-        return res
+        return sanitize_for_json(res)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -129,7 +129,7 @@ class BinanceFuturesFetcher:
             logger.error(f"Error fetching funding rate series for {symbol}: {e}")
             return []
 
-    def _request(self, endpoint: str, params: dict = None) -> dict:
+    def _request(self, endpoint: str, params: dict = None) -> Union[dict, list]:
         last_error = None
         for base in self.BASE_URLS:
             url = f"{base}{endpoint}"
@@ -138,16 +138,20 @@ class BinanceFuturesFetcher:
                 response.raise_for_status()
                 return response.json()
             except requests.exceptions.HTTPError as e:
-                # Propagate HTTP errors so callers can handle 418/429
                 status_code = getattr(e.response, 'status_code', 'Unknown')
-                logger.error(f"HTTP Error {status_code} for {endpoint}: {e}")
-                raise
+                logger.warning(f"HTTP Error {status_code} for {url}: {e}. Retrying with mirror...")
+                last_error = e
+                continue
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 last_error = e
                 logger.warning(f"Connection/DNS failed for {url}: {e}. Retrying with mirror...")
                 continue
+            except (requests.exceptions.JSONDecodeError, ValueError) as e:
+                last_error = e
+                logger.warning(f"Invalid JSON/empty response from {url}: {e}. Retrying with mirror...")
+                continue
             except Exception as e:
-                logger.error(f"Request failed {endpoint}: {e}")
+                logger.error(f"Request failed {url}: {e}")
                 return {}
         if last_error:
             logger.error(f"All Binance endpoints failed for {endpoint}: {last_error}")

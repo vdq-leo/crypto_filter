@@ -361,12 +361,18 @@ def multivariate_analysis_server(input, output, session, global_universe):
             new_focus = curr_focus if (curr_focus and curr_focus in syms) else (syms[0] if syms else "")
             ui.update_selectize("focus_corr_symbol", choices=[""] + syms, selected=new_focus)
 
-            p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
+            p.set(20, message="Loading ticker data...", detail=f"Checking {len(syms)} assets")
+            def _load_data_safe_corr(s):
+                df = manager.load_data(s, interval, auto_sync=False)
+                if df is None or df.empty:
+                    df = manager.load_data(s, interval, auto_sync=True)
+                return df
+
             with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
+                futures = [executor.submit(_load_data_safe_corr, s) for s in syms]
                 for i, _ in enumerate(as_completed(futures)):
-                    p.set(20 + int(80 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i] if i < len(syms) else ''}")
-            p.set(100, message="Sync complete")
+                    p.set(20 + int(80 * (i+1)/len(syms)), detail=f"Loaded {i+1}/{len(syms)}: {syms[i] if i < len(syms) else ''}")
+            p.set(100, message="Data ready")
 
     # ══════════════════════════════════════════════════════════
     # TAB 1: MATRIX RADAR
@@ -640,12 +646,18 @@ def multivariate_analysis_server(input, output, session, global_universe):
 
             selected_symbols_decomp.set(set(syms))
 
-            p.set(20, message="Syncing ticker data...", detail=f"Updating {len(syms)} assets")
+            p.set(20, message="Loading ticker data...", detail=f"Checking {len(syms)} assets")
+            def _load_data_safe_decomp(s):
+                df = manager.load_data(s, interval, auto_sync=False)
+                if df is None or df.empty:
+                    df = manager.load_data(s, interval, auto_sync=True)
+                return df
+
             with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(manager.load_data, s, interval, auto_sync=True) for s in syms]
+                futures = [executor.submit(_load_data_safe_decomp, s) for s in syms]
                 for i, _ in enumerate(as_completed(futures)):
-                    p.set(20 + int(80 * (i+1)/len(syms)), detail=f"Syncing {i+1}/{len(syms)}: {syms[i] if i < len(syms) else ''}")
-            p.set(100, message="Sync complete")
+                    p.set(20 + int(80 * (i+1)/len(syms)), detail=f"Loaded {i+1}/{len(syms)}: {syms[i] if i < len(syms) else ''}")
+            p.set(100, message="Data ready")
 
     # ══════════════════════════════════════════════════════════
     # TAB 2: DECOMPOSITION

@@ -11,7 +11,7 @@ from scipy.stats import gaussian_kde, rankdata
 from src.data import DataManager
 from src.metrics import MetricsEngine, copula_cond_probs
 from src.logger import logger
-from src.shared_state import get_manager, get_engine
+from src.shared_state import get_manager, get_engine, sanitize_for_json
 
 router = APIRouter()
 manager = get_manager()
@@ -49,7 +49,12 @@ def get_kde_path(vals, ranks):
 def generate_pair_radar(req: PairRequest):
     try:
         df_a = manager.load_data(req.symbol_a, req.interval, auto_sync=False)
+        if df_a is None or df_a.empty:
+            df_a = manager.load_data(req.symbol_a, req.interval, auto_sync=True)
+            
         df_b = manager.load_data(req.symbol_b, req.interval, auto_sync=False)
+        if df_b is None or df_b.empty:
+            df_b = manager.load_data(req.symbol_b, req.interval, auto_sync=True)
         
         if df_a is None or df_b is None or df_a.empty or df_b.empty:
             raise HTTPException(status_code=400, detail="Data missing for symbols")
@@ -218,7 +223,7 @@ def generate_pair_radar(req: PairRequest):
         def np_safe(v):
             return None if pd.isna(v) or np.isinf(v) else float(v)
 
-        return {
+        return sanitize_for_json({
             "metrics": {
                 "Coefficient": np_safe(slope),
                 "VolRatio": np_safe(vol_Ratio),
@@ -233,7 +238,7 @@ def generate_pair_radar(req: PairRequest):
             "chart_data": chart_data.to_dict(orient="records"),
             "copula": copula_data,
             "comp": comp_data
-        }
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -254,9 +259,9 @@ def generate_copula(req: CopulaRequest):
         
         p_uv, p_vu = copula_cond_probs(np.array(req.u), np.array(req.v), req.u_curr, req.v_curr, method=req.copula_type, **kwargs)
         
-        return {
-            "p_uv": float(p_uv),
-            "p_vu": float(p_vu)
-        }
+        return sanitize_for_json({
+            "p_uv": float(p_uv) if np.isfinite(p_uv) else None,
+            "p_vu": float(p_vu) if np.isfinite(p_vu) else None
+        })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

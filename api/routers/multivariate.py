@@ -7,7 +7,7 @@ import numpy as np
 from src.data import DataManager
 from ml_engine.analysis.multivariate import MatrixEngine, DecompositionEngine
 from src.config import MANDATORY_CRYPTO
-from src.shared_state import get_manager, get_engine
+from src.shared_state import get_manager, get_engine, sanitize_for_json
 
 router = APIRouter()
 manager = get_manager()
@@ -39,19 +39,13 @@ class DecompRequest(BaseModel):
 
 def _sanitize_for_json(data):
     if isinstance(data, pd.DataFrame):
-        df = data.replace([np.inf, -np.inf], None).where(pd.notnull(data), None)
-        return {"columns": list(df.columns), "index": list(df.index), "data": df.values.tolist()}
+        vals = data.to_numpy(dtype=object, na_value=None)
+        clean_vals = [[None if (v is None or pd.isna(v) or (isinstance(v, (float, np.floating)) and not np.isfinite(v))) else v for v in row] for row in vals]
+        return {"columns": list(data.columns), "index": list(data.index), "data": clean_vals}
     elif isinstance(data, pd.Series):
-        s = data.replace([np.inf, -np.inf], None).where(pd.notnull(data), None)
-        return {"index": list(s.index), "data": s.values.tolist()}
-    elif isinstance(data, np.ndarray):
-        d = np.where(np.isfinite(data), data, None)
-        return d.tolist()
-    elif isinstance(data, dict):
-        return {k: _sanitize_for_json(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [_sanitize_for_json(v) for v in data]
-    return data
+        vals = [None if (v is None or pd.isna(v) or (isinstance(v, (float, np.floating)) and not np.isfinite(v))) else v for v in data.to_numpy(dtype=object, na_value=None)]
+        return {"index": list(data.index), "data": vals}
+    return sanitize_for_json(data)
 
 def _load_data_concurrently(symbols, interval, load_price=False):
     from concurrent.futures import ThreadPoolExecutor, as_completed

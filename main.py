@@ -28,6 +28,7 @@ app.include_router(diagnostics.router, prefix="/api/diagnostics", tags=["Diagnos
 app.include_router(predictive.router, prefix="/api/predictive", tags=["Predictive Analytics"])
 app.include_router(multivariate.router, prefix="/api/multivariate", tags=["Multivariate"])
 app.include_router(pair_radar.router, prefix="/api/pair-radar", tags=["Pair Radar"])
+app.include_router(pair_radar.router, prefix="/api/pair_radar", tags=["Pair Radar"])
 app.include_router(logs.router, prefix="/api/logs", tags=["Logs"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"])
 
