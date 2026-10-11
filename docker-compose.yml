@@ -1,0 +1,21 @@
+services:
+  crypto-filter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crypto-filter-shiny
+    restart: unless-stopped
+    ports:
+      - "${SHINY_PORT:-8000}:8000"
+    environment:
+      - SHINY_PORT=8000
+      - DATA_DIR=/app/data_cache
+      - API_BASE_URL=http://127.0.0.1:3000/api
+    volumes:
+      - ./data_cache:/app/data_cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 25s

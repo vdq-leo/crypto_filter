@@ -4,6 +4,8 @@ Update this file to change titles, descriptions, symbols, and links.
 """
 
 
+import os
+
 # --- APP SETTINGS ---
 APP_TITLE = "Crypto Market Radar"
 APP_ICON = "LEO"
@@ -11,7 +13,7 @@ APP_LAYOUT = "wide"
 THEME = "quartz"
 BG_COLOR = "#1a1a1a"
 
-API_BASE_URL = "http://127.0.0.1:3000/api"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:3000/api")
 
 # --- TIMEZONE SETTING ---
 # Global offset from UTC in hours (e.g., 7 for UTC+7, -5 for EST)

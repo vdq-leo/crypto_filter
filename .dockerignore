@@ -1,0 +1,29 @@
+# Version control
+.git
+.gitignore
+
+# Python
+.venv
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+
+# Frontend
+frontend/
+node_modules/
+.next/
+
+# Large cache and data files (mounted via volume)
+data_cache/
+*.parquet
+
+# Logs and environment
+*.log
+.env
+.env.local
+.DS_Store

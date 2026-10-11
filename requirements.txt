@@ -19,7 +19,10 @@ fastapi
 uvicorn
 shap
 backtrader
-numbajinja2
+numba
+jinja2
+networkx
+python-multipart
 
 Riskfolio-Lib
 yfinance

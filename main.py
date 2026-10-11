@@ -8,14 +8,26 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Setup CORS for the Next.js frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # Next.js default ports
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+import os
+
+# Setup CORS for the Next.js frontend and other consumers
+cors_env = os.getenv("CORS_ORIGINS", "*")
+if cors_env == "*":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r"^https?://.*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[origin.strip() for origin in cors_env.split(",") if origin.strip()],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 @app.get("/")
 def read_root():
@@ -34,4 +46,5 @@ app.include_router(portfolio.router, prefix="/api/portfolio", tags=["Portfolio"]
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
