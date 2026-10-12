@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import requests
 import json
 from src.config import AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
+from src.shared_state import get_manager
 from src.logger import logger
 
 def portfolio_allocation_ui():
@@ -90,7 +91,7 @@ def portfolio_allocation_ui():
         )
     )
 
-def portfolio_allocation_server(input, output, session, global_universe):
+def portfolio_allocation_server(input, output, session, *args, **kwargs):
     
     # Store estimation results
     est_results = reactive.Value(None)
@@ -101,17 +102,6 @@ def portfolio_allocation_server(input, output, session, global_universe):
     
     has_init_pa = False
 
-    @reactive.effect
-    @reactive.event(global_universe, ignore_init=True)
-    def _sync_pa_from_global():
-        syms = global_universe.get()
-        if syms:
-            with reactive.isolate():
-                curr_sel = [s for s in list(input.pa_symbols() or []) if s in syms]
-                if not curr_sel:
-                    curr_sel = syms[:10]
-            ui.update_selectize("pa_symbols", choices=syms, selected=curr_sel)
-
     @reactive.Effect
     def _populate_pa_symbols():
         nonlocal has_init_pa
@@ -119,23 +109,23 @@ def portfolio_allocation_server(input, output, session, global_universe):
             return
         has_init_pa = True
         try:
+            manager = get_manager()
+            all_syms = manager.get_all_symbols()
+            if not all_syms:
+                try:
+                    res = requests.get(f"{API_BASE_URL}/data/symbols")
+                    all_syms = res.json().get("symbols", []) if res.status_code == 200 else []
+                except Exception:
+                    all_syms = []
+            if not all_syms:
+                all_syms = list(MANDATORY_CRYPTO)
+            
             with reactive.isolate():
-                g_syms = global_universe.get()
-                if g_syms:
-                    all_syms = sorted(list(set(g_syms).union(MANDATORY_CRYPTO)))
-                else:
-                    try:
-                        res = requests.get(f"{API_BASE_URL}/data/universe")
-                        all_syms = res.json()["symbols"] if res.status_code == 200 else []
-                    except Exception:
-                        all_syms = []
-                    all_syms = sorted(list(set(all_syms).union(MANDATORY_CRYPTO)))
-                
                 curr_sel = list(input.pa_symbols() or [])
                 if not curr_sel:
-                    curr_sel = all_syms[:10]
+                    curr_sel = [s for s in MANDATORY_CRYPTO if s in all_syms] or all_syms[:5]
                 
-                ui.update_selectize("pa_symbols", choices=all_syms, selected=curr_sel)
+            ui.update_selectize("pa_symbols", choices=all_syms, selected=curr_sel)
         except Exception as e:
             logger.log("Portfolio", "ERROR", f"Failed to populate symbols: {e}")
 

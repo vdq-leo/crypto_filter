@@ -24,7 +24,7 @@ from modules.symbol_diagnostics import symbol_diagnostics_ui, symbol_diagnostics
 from modules.pair_radar import pair_radar_ui, pair_radar_server
 from modules.portfolio_allocation import portfolio_allocation_ui, portfolio_allocation_server
 from modules.asset_filter import asset_filter_ui, asset_filter_server
-from src.config import BENCHMARK_SYMBOL, API_BASE_URL
+from src.config import BENCHMARK_SYMBOL, API_BASE_URL, MANDATORY_CRYPTO
 from datetime import datetime, timedelta
 
 # UI definition
@@ -164,30 +164,24 @@ def server(input, output, session):
         if has_init_app:
             return
         has_init_app = True
-        with reactive.isolate():
-            current_u = global_universe.get()
-            if not current_u:
-                try:
-                    res = requests.get(f"{API_BASE_URL}/data/universe")
-                    all_syms = res.json()["symbols"] if res.status_code == 200 else []
-                except:
-                    all_syms = []
-                if all_syms:
-                    global_universe.set(all_syms)
-            else:
-                all_syms = current_u
-            ui.update_selectize("quick_symbol", choices=all_syms)
-            
-            # Fetch benchmark/global timestamps once on startup
-            global_ts = get_timestamps(BENCHMARK_SYMBOL, "1h")
-            data_info.set({"global": global_ts})
-
-    @reactive.effect
-    @reactive.event(global_universe, ignore_init=True)
-    def _sync_navbar_quick_symbol():
-        syms = global_universe.get()
-        if syms:
-            ui.update_selectize("quick_symbol", choices=syms)
+        try:
+            from src.shared_state import get_manager
+            all_syms = get_manager().get_all_symbols()
+        except Exception:
+            all_syms = []
+        if not all_syms:
+            try:
+                res = requests.get(f"{API_BASE_URL}/data/symbols")
+                all_syms = res.json().get("symbols", []) if res.status_code == 200 else []
+            except:
+                all_syms = []
+        if not all_syms:
+            all_syms = list(MANDATORY_CRYPTO)
+        ui.update_selectize("quick_symbol", choices=all_syms)
+        
+        # Fetch benchmark/global timestamps once on startup
+        global_ts = get_timestamps(BENCHMARK_SYMBOL, "1h")
+        data_info.set({"global": global_ts})
     
     @render.ui
     def data_status_():

@@ -44,6 +44,11 @@ def get_universe_meta():
         "symbol_meta": {s: {"type": "COIN", "subtypes": ["-"]} for s in cached_syms}
     }
 
+@router.get("/symbols")
+def get_symbols():
+    """Get all available Binance USDT perpetual symbols (500+)."""
+    return {"symbols": manager.get_all_symbols()}
+
 @router.get("/universe")
 def get_universe(
     top_n: int = 50, 

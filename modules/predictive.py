@@ -25,7 +25,8 @@ matplotlib.use('Agg') # Safe for web apps
 
 from src.data import DataManager
 from src.metrics import MetricsEngine
-from src.config import METRIC_LABELS, ALL_METRICS, BENCHMARK_SYMBOL, DEFAULT_FEATURES, AVAILABLE_INTERVALS
+from src.config import METRIC_LABELS, ALL_METRICS, BENCHMARK_SYMBOL, DEFAULT_FEATURES, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, API_BASE_URL
+import requests
 from ml_engine.modeling.factory import ModelFactory
 from ml_engine.modeling.feature_selection import FeatureSelector
 from ml_engine.predictive.predictor import IsotonicCalibrator, CalibratedModelWrapper
@@ -395,7 +396,7 @@ def predictive_ui():
         , id="main_navset")
     )
 
-def predictive_server(input, output, session, global_universe):
+def predictive_server(input, output, session, *args, **kwargs):
     manager = get_manager()
     engine = get_engine()
     
@@ -740,20 +741,20 @@ def predictive_server(input, output, session, global_universe):
         return fig
 
     @reactive.effect
-    @reactive.event(global_universe)
-    def _sync_predictive_from_global():
-        syms = global_universe.get()
-        if syms:
-            inventory.set(syms)
-
-    @reactive.effect
     def _load_predictive_inventory():
-        g_syms = global_universe.get()
-        if g_syms:
-            inventory.set(g_syms)
-        else:
-            uni = manager.get_universe()
-            inventory.set(uni)
+        try:
+            all_syms = manager.get_all_symbols()
+            if not all_syms:
+                try:
+                    res = requests.get(f"{API_BASE_URL}/data/symbols")
+                    all_syms = res.json().get("symbols", []) if res.status_code == 200 else []
+                except Exception:
+                    all_syms = []
+            if not all_syms:
+                all_syms = list(MANDATORY_CRYPTO)
+            inventory.set(all_syms)
+        except Exception as e:
+            logger.log("Predictive", "ERROR", f"Failed to load inventory: {e}")
 
     @render.ui
     def symbol_selection_ui():

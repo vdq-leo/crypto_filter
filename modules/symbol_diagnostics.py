@@ -13,6 +13,7 @@ from scipy.stats import skew, kurtosis
 from sklearn.linear_model import LinearRegression
 
 from src.config import AVAILABLE_INTERVALS, BENCHMARK_SYMBOL, METRIC_LABELS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
+from src.shared_state import get_manager
 from src.logger import logger
 import requests
 
@@ -176,7 +177,7 @@ def symbol_diagnostics_ui():
         )
     )
     
-def symbol_diagnostics_server(input, output, session, global_interval, global_universe):
+def symbol_diagnostics_server(input, output, session, global_interval, *args, **kwargs):
     
     diag_data = reactive.Value({})
     engineering_results_cache = reactive.Value(None)
@@ -199,33 +200,27 @@ def symbol_diagnostics_server(input, output, session, global_interval, global_un
     
     has_init_diag = False
 
-    @reactive.effect
-    @reactive.event(global_universe, ignore_init=True)
-    def _sync_diag_from_global():
-        syms = global_universe.get()
-        if syms:
-            with reactive.isolate():
-                curr = input.diag_symbol() if "diag_symbol" in input else "BTCUSDT"
-            sel = curr if curr in syms else syms[0]
-            ui.update_selectize("diag_symbol", choices=syms, selected=sel)
-
     @reactive.Effect
     def populate_symbols():
         nonlocal has_init_diag
         if has_init_diag:
             return
         has_init_diag = True
-        with reactive.isolate():
-            g_syms = global_universe.get()
-            if g_syms:
-                all_syms = g_syms
-            else:
+        try:
+            manager = get_manager()
+            all_syms = manager.get_all_symbols()
+            if not all_syms:
                 try:
-                    res = requests.get(f"{API_BASE_URL}/data/universe")
-                    all_syms = res.json()["symbols"] if res.status_code == 200 else []
-                except:
+                    res = requests.get(f"{API_BASE_URL}/data/symbols")
+                    all_syms = res.json().get("symbols", []) if res.status_code == 200 else []
+                except Exception:
                     all_syms = []
-            sel = "BTCUSDT" if "BTCUSDT" in all_syms else (all_syms[0] if all_syms else None)
+            if not all_syms:
+                all_syms = list(MANDATORY_CRYPTO)
+            
+            with reactive.isolate():
+                curr = input.diag_symbol() if "diag_symbol" in input else "BTCUSDT"
+            sel = curr if (curr and curr in all_syms) else ("BTCUSDT" if "BTCUSDT" in all_syms else (all_syms[0] if all_syms else None))
             ui.update_selectize("diag_symbol", choices=all_syms, selected=sel)
             
             try:
@@ -234,6 +229,8 @@ def symbol_diagnostics_server(input, output, session, global_interval, global_un
                 diag_int = "1h"
             global_ts = get_timestamps(BENCHMARK_SYMBOL, diag_int)
             data_info.set({"global": global_ts, "symbol": {"oldest": "-", "latest": "-"}})
+        except Exception as e:
+            logger.log("Diagnostics", "ERROR", f"Failed to populate symbols: {e}")
     
     @reactive.Effect
     @reactive.event(input.diag_symbol, ignore_init=True)

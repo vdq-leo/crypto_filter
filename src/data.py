@@ -568,6 +568,25 @@ class DataManager:
             logger.warning(f"Error reading cached symbols from disk: {e}")
             return []
 
+    def get_all_symbols(self) -> List[str]:
+        """Returns all available Binance USDT perpetual symbols (500+ symbols), merged with mandatory/cached symbols."""
+        try:
+            syms = self.fetcher.get_all_symbols()
+            if syms:
+                combined = set(syms)
+                if MANDATORY_CRYPTO:
+                    combined.update(MANDATORY_CRYPTO)
+                combined.update(self.get_cached_symbols())
+                return sorted(list(combined))
+        except Exception as e:
+            logger.error(f"Error fetching all symbols from Binance: {e}")
+
+        # Fallback to cached symbols and mandatory crypto
+        cached = set(self.get_cached_symbols())
+        if MANDATORY_CRYPTO:
+            cached.update(MANDATORY_CRYPTO)
+        return sorted(list(cached))
+
     def get_universe(self, top_n: int = 1000) -> List[str]:
         """Returns top N symbols by volume, cached for 10 minutes session-wide."""
         now = time.time()
