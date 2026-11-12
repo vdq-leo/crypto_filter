@@ -195,9 +195,6 @@ def asset_filter_server(*args, **kwargs):
     filtered_df = reactive.Value(pd.DataFrame())
     status_msg = reactive.Value("")
 
-    # Mutable sync state to prevent feedback loops between Table, Selectize, and Global Universe
-    sync_state = {"bulk_in_progress": False}
-
     has_fetched_meta = False
 
     @reactive.effect
@@ -207,7 +204,7 @@ def asset_filter_server(*args, **kwargs):
             return
         has_fetched_meta = True
         try:
-            res = requests.get(f"{API_BASE_URL}/data/universe/meta", timeout=10)
+            res = await asyncio.to_thread(requests.get, f"{API_BASE_URL}/data/universe/meta", timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 t_list = data.get("types", []) or DEFAULT_TYPES
@@ -284,7 +281,7 @@ def asset_filter_server(*args, **kwargs):
             height=None,
             filters=False,
             summary=False,
-            selection_mode="rows",
+            selection_mode="none",
             styles=[
                 {"cols": [0], "style": {"width": "60px", "max-width": "70px", "text-align": "center"}},
                 {"cols": [1], "style": {"font-weight": "600", "width": "150px"}},
@@ -294,7 +291,6 @@ def asset_filter_server(*args, **kwargs):
         )
 
     async def do_fetch():
-        sync_state["bulk_in_progress"] = True
         try:
             top_n = input.asset_filter_top_n()
         except Exception:
@@ -322,7 +318,7 @@ def asset_filter_server(*args, **kwargs):
             params["subtypes"] = list(subtypes)
 
         try:
-            res = requests.get(f"{API_BASE_URL}/data/universe", params=params, timeout=15)
+            res = await asyncio.to_thread(requests.get, f"{API_BASE_URL}/data/universe", params=params, timeout=15)
             if res.status_code == 200:
                 payload = res.json()
                 items = payload.get("items", [])
@@ -344,17 +340,17 @@ def asset_filter_server(*args, **kwargs):
                     df = pd.DataFrame(columns=["#", "Symbol", "Type", "Sub-Types", "Volume (24h)"])
 
                 filtered_df.set(df)
-                global_universe.set(syms)
+                
+                with reactive.isolate():
+                    current_syms = global_universe.get() or []
+                if set(syms) != set(current_syms):
+                    global_universe.set(syms)
+
                 status_msg.set(f"✓ {len(syms)} symbols loaded.")
                 
-                # Default: select all rows in table and selectize
+                # Update selectize with new choices and select all
                 try:
                     ui.update_selectize("asset_filter_selected_symbols", choices=syms, selected=syms, session=session)
-                except Exception:
-                    pass
-
-                try:
-                    await asset_filter_table.update_cell_selection("all")
                 except Exception:
                     pass
             else:
@@ -366,118 +362,40 @@ def asset_filter_server(*args, **kwargs):
             logger.error(f"Error filtering universe: {e}")
             status_msg.set(f"✗ Error: {e}")
             ui.notification_show(f"Error filtering universe: {e}", type="error")
-        finally:
-            await asyncio.sleep(0.5)
-            sync_state["bulk_in_progress"] = False
 
     @reactive.effect
     @reactive.event(input.asset_filter_btn_apply, ignore_init=True)
     async def _on_apply():
         await do_fetch()
 
-    # Handlers for Table Select All / Deselect All
+    # Handlers for Select All / Deselect All
     @reactive.effect
     @reactive.event(input.asset_table_select_all)
-    async def _on_table_select_all():
+    def _on_table_select_all():
         df = filtered_df.get()
         if not df.empty and "Symbol" in df.columns:
             all_syms = df["Symbol"].tolist()
-            sync_state["bulk_in_progress"] = True
-            try:
+            with reactive.isolate():
+                current = global_universe.get() or []
+            if set(all_syms) != set(current):
                 global_universe.set(all_syms)
-                try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=all_syms, session=session)
-                except Exception:
-                    pass
-                try:
-                    await asset_filter_table.update_cell_selection("all")
-                except Exception:
-                    pass
-            finally:
-                await asyncio.sleep(0.5)
-                sync_state["bulk_in_progress"] = False
+                ui.update_selectize("asset_filter_selected_symbols", selected=all_syms, session=session)
 
     @reactive.effect
     @reactive.event(input.asset_table_deselect_all)
-    async def _on_table_deselect_all():
-        sync_state["bulk_in_progress"] = True
-        try:
-            df = filtered_df.get()
-            all_syms = df["Symbol"].tolist() if (not df.empty and "Symbol" in df.columns) else []
+    def _on_table_deselect_all():
+        with reactive.isolate():
+            current = global_universe.get() or []
+        if current:
             global_universe.set([])
-            try:
-                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[], session=session)
-            except Exception:
-                pass
-            try:
-                await asset_filter_table.update_cell_selection(None)
-            except Exception:
-                pass
-        finally:
-            await asyncio.sleep(0.5)
-            sync_state["bulk_in_progress"] = False
+            ui.update_selectize("asset_filter_selected_symbols", selected=[], session=session)
 
-    # Sync Select Box (selectize) changes to Table and global_universe
+    # Sync Select Box (selectize) changes to global_universe
     @reactive.effect
     @reactive.event(input.asset_filter_selected_symbols, ignore_init=True)
-    async def _on_selectize_change():
-        if sync_state["bulk_in_progress"]:
-            return
+    def _on_selectize_change():
         selected = list(input.asset_filter_selected_symbols() or [])
         with reactive.isolate():
             current = global_universe.get() or []
-            df = filtered_df.get()
         if set(selected) != set(current):
             global_universe.set(selected)
-            if not df.empty and "Symbol" in df.columns:
-                sym_list = df["Symbol"].tolist()
-                rows = [i for i, s in enumerate(sym_list) if s in selected]
-                try:
-                    await asset_filter_table.update_cell_selection({"type": "row", "rows": tuple(rows)})
-                except Exception:
-                    pass
-
-    # Sync Table Row Selection to Select Box and global_universe
-    @reactive.effect
-    @reactive.event(asset_filter_table.cell_selection, ignore_init=True)
-    async def _sync_table_selection_to_global():
-        if sync_state["bulk_in_progress"]:
-            return
-
-        with reactive.isolate():
-            df = filtered_df.get()
-            current = global_universe.get() or []
-
-        if df.empty or "Symbol" not in df.columns:
-            return
-
-        sel = asset_filter_table.cell_selection()
-        all_syms = df["Symbol"].tolist()
-
-        if sel is None:
-            if current:
-                global_universe.set([])
-                try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[], session=session)
-                except Exception:
-                    pass
-            return
-
-        rows = sel.get("rows", ())
-        if not rows:
-            if current:
-                global_universe.set([])
-                try:
-                    ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=[], session=session)
-                except Exception:
-                    pass
-            return
-
-        valid_rows = [r for r in rows if r < len(df)]
-        selected_symbols = df.iloc[valid_rows]["Symbol"].tolist()
-        if set(selected_symbols) != set(current):
-            global_universe.set(selected_symbols)
-            try:
-                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=selected_symbols, session=session)
-            except Exception:
-                pass

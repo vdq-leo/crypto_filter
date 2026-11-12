@@ -1,14 +1,63 @@
+import os
+import asyncio
+from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routers import data, market_radar, diagnostics, predictive, multivariate, pair_radar, logs, portfolio
+from src.logger import logger
+from src.shared_state import get_manager
+from src.config import MANDATORY_CRYPTO
+
+SYNC_INTERVALS = ["15m", "1h", "4h", "1d"]
+
+def _sync_mandatory_batch():
+    try:
+        manager = get_manager()
+        symbols = list(MANDATORY_CRYPTO)
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = []
+            for sym in symbols:
+                for interval in SYNC_INTERVALS:
+                    futures.append(pool.submit(manager.load_data, sym, interval, auto_sync=True))
+            for f in futures:
+                try:
+                    f.result()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.error(f"Error in _sync_mandatory_batch: {e}")
+
+async def continuous_data_sync_daemon():
+    logger.info("Continuous market data ingestion daemon started.")
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await asyncio.to_thread(_sync_mandatory_batch)
+            logger.info("Continuous data ingestion: Synced mandatory symbols cache.")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in continuous data ingestion daemon: {e}")
+        await asyncio.sleep(120)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sync_task = asyncio.create_task(continuous_data_sync_daemon())
+    yield
+    sync_task.cancel()
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
 
 app = FastAPI(
     title="Crypto Filter API",
     description="Backend API for quantitative symbol diagnostics and predictive analytics",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
-
-import os
 
 # Setup CORS for the Next.js frontend and other consumers
 cors_env = os.getenv("CORS_ORIGINS", "*")

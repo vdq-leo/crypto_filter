@@ -88,7 +88,7 @@ def run_diagnostics(req: DiagnosticsRequest):
 
         # 2. Radial Chart Metrics
         try:
-            diag_slice = max(req.diag_window * 2, 2500)
+            diag_slice = max(req.diag_window * 2, 5000)
             latest_metrics = engine.calculate_all_indicators(
                 df.iloc[-diag_slice:], 
                 benchmark_returns=np.log(bench_df['close']).diff()[-diag_slice:] if bench_df is not None else None,

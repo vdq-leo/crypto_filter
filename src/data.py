@@ -19,6 +19,40 @@ from src.config import MANDATORY_CRYPTO, BENCHMARK_SYMBOL, TIMEZONE_OFFSET, IGNO
 
 logger = logging.getLogger(__name__)
 
+def get_default_fetch_days(interval: str, years: float = 0) -> int:
+    """Returns number of historical days to fetch to ensure sufficient warmup bars (at least 3,000 to 5,000 candles)."""
+    if years > 0:
+        return int(365 * years)
+    mapping = {
+        '1m': 14,      # ~20,000 candles
+        '3m': 21,      # ~10,000 candles
+        '5m': 30,      # ~8,640 candles
+        '15m': 90,     # ~8,640 candles
+        '30m': 180,    # ~8,640 candles
+        '1h': 200,     # ~4,800 candles
+        '2h': 400,     # ~4,800 candles
+        '4h': 750,     # ~4,500 candles (~2 years)
+        '6h': 1000,    # ~4,000 candles
+        '8h': 1200,    # ~3,600 candles
+        '12h': 1500,   # ~3,000 candles
+        '1d': 1825,    # ~1,825 candles (5 years)
+        '3d': 3650,    # 10 years
+        '1w': 3650,    # 10 years
+        '1M': 3650     # 10 years
+    }
+    return mapping.get(interval, 200)
+
+def get_yf_max_days(interval: str, years: float = 0) -> int:
+    """Returns the maximum allowed lookback days for Yahoo Finance API by interval."""
+    if interval == '1m':
+        return 7
+    elif interval in ['2m', '3m', '5m', '15m', '30m']:
+        return 59
+    elif interval in ['1h', '2h', '4h', '6h', '8h', '12h']:
+        return min(int(365 * years) if years > 0 else 720, 720)
+    else: # 1d, 3d, 1w, 1M
+        return int(365 * years) if years > 0 else 3650
+
 class BinanceFuturesFetcher:
     """Fetches data from Binance Perpetual Futures (USDT-M)"""
     
@@ -415,8 +449,9 @@ class BinanceFuturesFetcher:
         if symbol in ['QQQUSDT', 'SPYUSDT', 'XAUUSDT', 'XAGUSDT']:
             start_ts = None
             end_ts = None
+            max_days = get_yf_max_days(interval, years=years)
             if start_time is None and end_time is None:
-                days = int(365 * years) if years > 0 else 3650  # Fetch 10 years by default for YF assets
+                days = max_days
                 start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
                 end_ts = int(datetime.now().timestamp() * 1000)
             else:
@@ -432,14 +467,14 @@ class BinanceFuturesFetcher:
                 elif start_time is not None:
                     start_ts = int(start_time)
                 else:
-                    days = int(365 * years) if years > 0 else 3650
+                    days = max_days
                     start_ts = int((pd.to_datetime(end_ts, unit='ms') - timedelta(days=days)).timestamp() * 1000)
             return _fetch_yf_data(symbol, interval, start_ts=start_ts, end_ts=end_ts)
             
         # Calculate start_ts and end_ts in milliseconds
         if start_time is None and end_time is None:
-            # use years if provided, else default to some recent period
-            days = int(365 * years) if years > 0 else 30
+            # use years if provided, else default to interval-appropriate lookback
+            days = get_default_fetch_days(interval, years=years)
             start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
             end_ts = int(datetime.now().timestamp() * 1000)
         else:
@@ -457,8 +492,8 @@ class BinanceFuturesFetcher:
             elif start_time is not None:
                 start_ts = int(start_time)
             else:
-                # fall back to years if start_time is None
-                days = int(365 * years) if years > 0 else 30
+                # fall back to interval-appropriate lookback if start_time is None
+                days = get_default_fetch_days(interval, years=years)
                 start_ts = int((pd.to_datetime(end_ts, unit='ms') - timedelta(days=days)).timestamp() * 1000)
 
         all_dfs = []
@@ -700,13 +735,13 @@ class DataManager:
         try:
             first_ts, last_ts = self.get_cache_range(symbol, interval)
             end_t = datetime.now()
+            default_days = get_default_fetch_days(interval)
+            if symbol in ['QQQUSDT', 'SPYUSDT', 'XAUUSDT', 'XAGUSDT']:
+                default_days = min(default_days, get_yf_max_days(interval))
             
             if not first_ts:
-                # No data: fetch 30 days (or 10 years for YF assets)
-                if symbol in ['QQQUSDT', 'SPYUSDT', 'XAUUSDT', 'XAGUSDT']:
-                    days_to_fetch = 3650
-                else:
-                    days_to_fetch = 30
+                # No data: fetch full default history (respecting YF interval limits)
+                days_to_fetch = default_days
                     
                 logger.info(f"Auto-sync: Fetching initial {days_to_fetch} days for {symbol} ({interval})")
                 requested_start = end_t - timedelta(days=days_to_fetch)
@@ -715,13 +750,25 @@ class DataManager:
                     self.save_data(df, symbol, interval)
                     self._last_sync[cache_key] = now
             else:
-                # Incremental forward gap (start from last_ts to update the last candle and fetch new ones)
+                # 1. Forward sync: fetch new candles from last_ts
                 start_ts_ms = int(pd.Timestamp(last_ts).tz_localize('UTC').timestamp() * 1000)
                 df_fwd = self.fetcher.fetch_history(symbol, interval, start_time=start_ts_ms, end_time=end_t)
                 if not df_fwd.empty and len(df_fwd) > 1:
                     logger.info(f"Auto-sync: Fetched {len(df_fwd)} new candles for {symbol} ({interval})")
                     self.append_data(symbol, interval, df_fwd)
                     self._last_sync[cache_key] = now
+
+                # 2. Backward backfill: if cached data is shorter than required warmup lookback, backfill older candles
+                required_start = end_t - timedelta(days=default_days)
+                first_dt = pd.to_datetime(first_ts).tz_localize(None)
+                if first_dt > required_start + timedelta(days=3):
+                    logger.info(f"Auto-sync: Backfilling history for {symbol} ({interval}) from {required_start} to {first_dt}")
+                    b_start_ms = int(pd.Timestamp(required_start).tz_localize('UTC').timestamp() * 1000)
+                    b_end_ms = int(pd.Timestamp(first_dt).tz_localize('UTC').timestamp() * 1000)
+                    df_back = self.fetcher.fetch_history(symbol, interval, start_time=b_start_ms, end_time=b_end_ms)
+                    if not df_back.empty:
+                        self.append_data(symbol, interval, df_back)
+                        self._last_sync[cache_key] = now
         except Exception as e:
             logger.error(f"Error auto-syncing {symbol}_{interval}: {e}")
 
@@ -895,21 +942,27 @@ def _fetch_yf_data(symbol: str, interval: str, start_ts: int = None, end_ts: int
     yf_interval = interval_map.get(interval, '1d')
     
     ticker = yf.Ticker(yf_sym)
+    max_days = get_yf_max_days(interval)
+    now_dt = datetime.now()
+    min_allowed_dt = now_dt - timedelta(days=max_days)
     
     try:
         if start_ts and end_ts:
             start_date = pd.to_datetime(start_ts, unit='ms')
             end_date = pd.to_datetime(end_ts, unit='ms')
+            if start_date < min_allowed_dt:
+                start_date = min_allowed_dt
+            if start_date >= end_date:
+                start_date = end_date - timedelta(days=min(max_days, 1))
             df = ticker.history(start=start_date, end=end_date, interval=yf_interval)
         elif limit:
-            if yf_interval in ['1m', '2m', '5m', '15m', '30m', '1h', '90m']:
-                df = ticker.history(period="730d", interval=yf_interval)
-            else:
-                df = ticker.history(period="max", interval=yf_interval)
+            period_str = "max" if yf_interval in ['1d', '1wk'] else f"{max_days}d"
+            df = ticker.history(period=period_str, interval=yf_interval)
             if not df.empty:
                 df = df.tail(limit)
         else:
-            df = ticker.history(period="max", interval=yf_interval)
+            period_str = "max" if yf_interval in ['1d', '1wk'] else f"{max_days}d"
+            df = ticker.history(period=period_str, interval=yf_interval)
     except Exception as e:
         logger.error(f"Failed to fetch YF data for {yf_sym}: {e}")
         return pd.DataFrame()
@@ -932,6 +985,13 @@ def _fetch_yf_data(symbol: str, interval: str, start_ts: int = None, end_ts: int
     if df['open_time'].dt.tz is not None:
         df['open_time'] = df['open_time'].dt.tz_convert('UTC').dt.tz_localize(None)
         
+    # Ensure uniform nanosecond timestamps matching Binance parquet dtypes
+    df['open_time'] = pd.to_datetime(df['open_time']).astype('datetime64[ns]')
+
+    # For hourly candles, floor to the hour so US equity (:30) candles align with Binance (:00) hourly candles
+    if interval_map.get(interval, '1d') in ['1h', '2h', '4h', '6h', '8h', '12h']:
+        df['open_time'] = df['open_time'].dt.floor('h')
+
     # Normalize to midnight to align with Binance daily candles
     if interval_map.get(interval, '1d') in ['1d', '1wk']:
         df['open_time'] = df['open_time'].dt.normalize()

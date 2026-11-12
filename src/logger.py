@@ -27,6 +27,18 @@ class ActivityLogger:
         self._logs.append(entry)
         # Also print to console
         print(f"[{level}] [{module}] {message}")
+        
+    def info(self, message: str, module: str = "System"):
+        self.log(module, "INFO", message)
+
+    def warning(self, message: str, module: str = "System"):
+        self.log(module, "WARNING", message)
+
+    def error(self, message: str, module: str = "System"):
+        self.log(module, "ERROR", message)
+
+    def debug(self, message: str, module: str = "System"):
+        self.log(module, "DEBUG", message)
     
     def get_logs(self, limit: int = 100) -> pd.DataFrame:
         """Get recent logs as DataFrame"""

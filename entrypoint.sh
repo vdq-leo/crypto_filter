@@ -31,9 +31,9 @@ for i in {1..30}; do
     sleep 0.5
 done
 
-# Start Shiny App
+# Start Shiny App with resilient websocket keep-alive settings
 echo "[2/2] Starting Crypto Filter Shiny App on 0.0.0.0:${PORT}..."
-python -m shiny run app.py --host 0.0.0.0 --port "${PORT}" &
+python -c "from shiny import run_app; run_app('app:app', host='0.0.0.0', port=${PORT}, ws_ping_interval=20, ws_ping_timeout=300, timeout_keep_alive=300)" &
 SHINY_PID=$!
 
 # Wait for Shiny process

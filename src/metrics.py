@@ -27,9 +27,12 @@ def _rma(x, n_period):
                         sum_val += x[k]
                         count += 1
                 a[i] = sum_val / count if count > 0 else np.nan
-                alpha = 1.0 / n_period
+                alpha = 1.0 / float(n_period)
                 for j in range(i+1, len(x)):
-                    a[j] = alpha * x[j] + (1 - alpha) * a[j-1]
+                    if np.isnan(x[j]):
+                        a[j] = a[j-1]
+                    else:
+                        a[j] = alpha * x[j] + (1.0 - alpha) * a[j-1]
                 break
     return a
 
@@ -171,25 +174,45 @@ class MetricsEngine:
         return series.ewm(span=span, adjust=False).mean()
 
     @staticmethod
+    def rma(series: pd.Series, length: int) -> pd.Series:
+        """Calculates Wilder's Running Moving Average (ta.rma) matching TradingView Pine Script."""
+        vals = series.values.astype(float)
+        res = _rma(vals, length)
+        return pd.Series(res, index=series.index)
+
+    @staticmethod
     def rsi(series: pd.Series, n: int = 14) -> pd.Series:
+        """Calculates RSI using Wilder's Smoothing (ta.rma) matching TradingView Pine Script."""
         delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).ewm(span=n, min_periods=n).mean()
-        loss = (-delta.where(delta < 0, 0)).ewm(span=n, min_periods=n).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
+        gain = delta.clip(lower=0.0).fillna(0.0)
+        loss = (-delta).clip(lower=0.0).fillna(0.0)
+        
+        rma_gain = pd.Series(_rma(gain.values.astype(float), n), index=series.index)
+        rma_loss = pd.Series(_rma(loss.values.astype(float), n), index=series.index)
+        
+        rs = rma_gain / rma_loss
+        rsi_vals = 100.0 - (100.0 / (1.0 + rs))
+        rsi_vals = rsi_vals.where(rma_loss != 0, np.where(rma_gain == 0, 50.0, 100.0))
+        rsi_vals = rsi_vals.where(~(rma_gain.isna() & rma_loss.isna()), np.nan)
+        return rsi_vals
 
     @staticmethod
     def atr(high: pd.Series, low: pd.Series, close: pd.Series, n: int = 14) -> pd.Series:
+        """Calculates ATR using Wilder's Smoothing (ta.rma) matching TradingView Pine Script."""
         tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.ewm(span=n, min_periods=n).mean()
+        if len(tr) > 0:
+            tr.iloc[0] = tr1.iloc[0]
+        atr_vals = _rma(tr.values.astype(float), n)
+        return pd.Series(atr_vals, index=close.index)
 
     @staticmethod
     def bollinger_bands(series: pd.Series, n: int = 20, k: float = 2.0) -> tuple:
-        ma = series.ewm(span=n).mean()
-        std = series.ewm(span=n).std()
+        """Calculates Bollinger Bands matching TradingView ta.bb (ta.sma & ta.stdev with ddof=0)."""
+        ma = series.rolling(n).mean()
+        std = series.rolling(n).std(ddof=0)
         upper = ma + (k * std)
         lower = ma - (k * std)
         return upper, lower, ma
@@ -203,16 +226,16 @@ class MetricsEngine:
     @staticmethod
     def rsi_adapt(src: pd.Series, w_short: int = 40, w_long: int = 200, vol_factor: float = 1.0) -> pd.Series:
         ret = np.log(src / src.shift(1))
-        vS = ret.rolling(w_short).std()
-        vL = ret.rolling(w_long).std()
+        vS = ret.rolling(w_short).std(ddof=0)
+        vL = ret.rolling(w_long).std(ddof=0)
         a = np.clip(vS / (vL * vol_factor), 0.01, 0.99)
         return a * MetricsEngine.rsi(src, w_short) + (1 - a) * MetricsEngine.rsi(src, w_long)
 
     @staticmethod
     def vama_cma(src: pd.Series, w_short: int = 40, w_long: int = 200, vol_factor: float = 1.0) -> pd.Series:
         ret = np.log(src / src.shift(1))
-        vS = ret.rolling(w_short).std()
-        vL = ret.rolling(w_long).std()
+        vS = ret.rolling(w_short).std(ddof=0)
+        vL = ret.rolling(w_long).std(ddof=0)
         a = 2.0 / (np.maximum(1, np.floor(10.0 / np.minimum(vS / (vL * vol_factor), 1.0))) + 1.0)
         vama_vals = _adaptive_ema_numba(src.values, a.values)
         vama = pd.Series(vama_vals, index=src.index)
@@ -223,12 +246,12 @@ class MetricsEngine:
     def ewmac(src: pd.Series, w_short: int = 40, w_long: int = 200) -> pd.Series:
         fast = src.ewm(span=w_short, adjust=False).mean()
         slow = src.ewm(span=w_long, adjust=False).mean()
-        v = src.rolling(w_short).std().replace(0, 1e-9)
+        v = src.rolling(w_short).std(ddof=0).replace(0, 1e-9)
         return (fast - slow) / v
 
     @staticmethod
     def z_score_indicator(src: pd.Series, length: int = 100) -> pd.Series:
-        return (src - src.rolling(length).mean()) / src.rolling(length).std().replace(0, 1e-9)
+        return (src - src.rolling(length).mean()) / src.rolling(length).std(ddof=0).replace(0, 1e-9)
 
     @staticmethod
     def vwap(df: pd.DataFrame) -> pd.Series:
@@ -264,7 +287,7 @@ class MetricsEngine:
         # Pine Script f_pop_stdev(src, length) => ta.sma(math.pow(src - ta.sma(src, length), 2), length)
         def _f_pop_stdev(x: pd.Series, length: int) -> pd.Series:
             mean = x.rolling(length, min_periods=length).mean()
-            var = ((x - mean) ** 2).rolling(length, min_periods=1).mean()
+            var = ((x - mean) ** 2).rolling(length, min_periods=length).mean()
             return np.sqrt(var)
             
         vol = _f_pop_stdev(logret, period)
@@ -296,9 +319,11 @@ class MetricsEngine:
         targetWeight[valid_mask] = np.clip(targetVol[valid_mask] / vol[valid_mask], 0.0, 2.0)
         
         vama_dist = (src - vama) / src
+        price_vama = src / vama.replace(0, np.nan)
         
         return {
             'vama': vama,
+            'price_vama': price_vama,
             'vama_dist': vama_dist,
             'vol': vol,
             'targetVol': targetVol,
@@ -321,7 +346,7 @@ class MetricsEngine:
         return res['vama']
 
     @staticmethod
-    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None, tail_only: bool = False) -> pd.DataFrame:
+    def calculate_all_indicators(df: pd.DataFrame, window: int = 40, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h', include_metrics: Optional[List[str]] = None, tail_only: bool = False, use_closed_bar: bool = False) -> pd.DataFrame:
         """
         Calculates all 11 advanced metrics requested by the user.
         Returns a DataFrame with the same index as the input df.
@@ -335,13 +360,13 @@ class MetricsEngine:
             
         max_warmup = w_slow * 2
         if should_calc('rel_strength_z'):
-            max_warmup = max(max_warmup, 120)
+            max_warmup = max(max_warmup, 500)
         mr_metrics = {'mr_prob', 'price_z', 'adf_prob', 'div_prob', 'slope_prob', 'vol_prob', 'vol_ratio'}
         if any(should_calc(m) for m in mr_metrics):
             max_warmup = max(max_warmup, 1000)
-        vama_metrics = {'vama', 'vama_raw', 'vama_dist', 'vama_weight', 'vama_span', 'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos', 'vama_current_ret', 'vama_long_thr', 'vama_short_thr'}
+        vama_metrics = {'vama', 'vama_raw', 'price_vama', 'vama_dist', 'vama_weight', 'vama_span', 'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos', 'vama_current_ret', 'vama_long_thr', 'vama_short_thr'}
         if any(should_calc(m) for m in vama_metrics):
-            max_warmup = max(max_warmup, 2500)
+            max_warmup = max(max_warmup, 5000)
             
         if tail_only and len(df) > max_warmup:
             # Keep enough history to warm up EMAs and rolling windows
@@ -396,15 +421,15 @@ class MetricsEngine:
         if should_calc('rel_strength_z'):
             if benchmark_prices is not None:
                 common_idx = df.index.intersection(benchmark_prices.index)
-                if len(common_idx) >= 100:
+                if len(common_idx) >= 200:
                     asset_p = df.loc[common_idx, 'close']
                     btc_p = benchmark_prices.loc[common_idx]
                     
-                    # Params (Reduced to ~1/3 to require less historical data)
-                    p_short = 13
-                    p_long = 67
-                    beta_len = 33
-                    smooth = 3
+                    # Original Pine Script Parameters
+                    p_short = 40
+                    p_long = 200
+                    beta_len = 100
+                    smooth = 10
                     volFactor = 1.0
                     
                     # Asset Components
@@ -423,8 +448,8 @@ class MetricsEngine:
                     spread = sym1_idx - sym2_idx
                     diff = spread.diff()
                     
-                    sVol = diff.rolling(p_short).std().clip(lower=1e-6)
-                    lVol = diff.rolling(p_long).std().clip(lower=1e-6)
+                    sVol = diff.rolling(p_short).std(ddof=0).clip(lower=1e-6)
+                    lVol = diff.rolling(p_long).std(ddof=0).clip(lower=1e-6)
                     
                     alpha = ((1.0 / smooth) / ((lVol * volFactor) / sVol)).clip(lower=0.05, upper=0.95)
                     alpha = alpha.fillna(0.05)
@@ -468,10 +493,11 @@ class MetricsEngine:
             res['imbalance_bar'] = (body / rng) * np.sign(close - df['open'])
         
         # 16. VAMA (Volatility Adjusted Moving Average) - Pine Script "VAMA Volatility Expansion" (BTCUSDT params)
-        vama_metrics = {'vama', 'vama_raw', 'vama_dist', 'vama_weight', 'vama_span', 'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos', 'vama_current_ret', 'vama_long_thr', 'vama_short_thr'}
+        vama_metrics = {'vama', 'vama_raw', 'price_vama', 'vama_dist', 'vama_weight', 'vama_span', 'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos', 'vama_current_ret', 'vama_long_thr', 'vama_short_thr'}
         if any(should_calc(m) for m in vama_metrics):
-            vama_dict = MetricsEngine.calculate_vama(close, maMin=50, period=37, volFactor=0.17, longZScore=1.15, shortZScore=1.45)
-            if should_calc('vama'): res['vama'] = vama_dict['vama']
+            vama_dict = MetricsEngine.calculate_vama(close, maMin=50, period=37, volFactor=0.17, longZScore=1.15, shortZScore=1.45, use_closed_bar=use_closed_bar)
+            if should_calc('price_vama'): res['price_vama'] = vama_dict['price_vama']
+            if should_calc('vama'): res['vama'] = vama_dict['price_vama']
             if should_calc('vama_raw'): res['vama_raw'] = vama_dict['vama']
             if should_calc('vama_dist'): res['vama_dist'] = vama_dict['vama_dist']
             if should_calc('vama_weight'): res['vama_weight'] = vama_dict['targetWeight']
@@ -569,15 +595,15 @@ class MetricsEngine:
             
             divergence = fast - slow
             divMean = divergence.rolling(divNormLen).mean()
-            divStd = divergence.rolling(divNormLen).std(ddof=1)
+            divStd = divergence.rolling(divNormLen).std(ddof=0)
             divZ = np.where(divStd > 1e-10, (divergence - divMean) / divStd, 0.0)
             
             divSlope = divergence.diff()
             slopeMean = divSlope.rolling(slopeNormLen).mean()
-            slopeStd = divSlope.rolling(slopeNormLen).std(ddof=1)
+            slopeStd = divSlope.rolling(slopeNormLen).std(ddof=0)
             slopeZ = np.where(slopeStd > 1e-10, (divSlope - slopeMean) / slopeStd, 0.0)
             
-            adfStd = adf.rolling(adfNormLen).std(ddof=1)
+            adfStd = adf.rolling(adfNormLen).std(ddof=0)
             adfZ = np.where(adfStd > 1e-10, (crit - adf) / adfStd, 0.0)
             
             # True Range: max(high - low, abs(high - close[1]), abs(low - close[1]))
@@ -587,18 +613,20 @@ class MetricsEngine:
                 (high - prev_close).abs(),
                 (low - prev_close).abs()
             ], axis=1).max(axis=1)
+            if len(tr) > 0:
+                tr.iloc[0] = (high.iloc[0] - low.iloc[0])
             
-            # ta.atr via Wilder's RMA (alpha = 1 / length)
-            atrShort = tr.ewm(alpha=1.0 / volShortLen, adjust=False).mean()
-            atrLong = tr.ewm(alpha=1.0 / volLongLen, adjust=False).mean()
+            # ta.atr via Wilder's RMA (alpha = 1 / length) matching Pine Script
+            atrShort = pd.Series(_rma(tr.values.astype(float), volShortLen), index=close.index)
+            atrLong = pd.Series(_rma(tr.values.astype(float), volLongLen), index=close.index)
             
             volRatio = np.where(atrLong > 0, atrShort / atrLong, 1.0)
             logVolRatio = pd.Series(np.where(volRatio > 0, np.log(volRatio), 0.0), index=close.index)
-            volStd = logVolRatio.rolling(volNormLen).std(ddof=1)
+            volStd = logVolRatio.rolling(volNormLen).std(ddof=0)
             volZ = np.where(volStd > 1e-10, logVolRatio / volStd, 0.0)
             
             priceMean = close.rolling(priceZLookback).mean()
-            priceStd = close.rolling(priceZLookback).std(ddof=1)
+            priceStd = close.rolling(priceZLookback).std(ddof=0)
             priceZ = np.where(priceStd > 0, (close - priceMean) / priceStd, 0.0)
             
             adfScore = np.clip(adfZ, -zClamp, zClamp)
@@ -785,54 +813,38 @@ class MetricsEngine:
         dy_s = pd.Series(dy)
         x_s = pd.Series(x)
         
-        # Rolling sums with min_periods=1 for robustness
-        sum_x = x_s.ewm(span=lookback, min_periods=1).sum()
-        sum_y = dy_s.ewm(span=lookback, min_periods=1).sum()
-        sum_xx = (x_s**2).ewm(span=lookback, min_periods=1).sum()
-        sum_xy = (x_s * dy_s).ewm(span=lookback, min_periods=1).sum()
-        sum_yy = (dy_s**2).ewm(span=lookback, min_periods=1).sum()
+        # Rolling sums over lookback window matching Pine Script
+        k = lookback - 1
+        sum_x = x_s.rolling(k).sum()
+        sum_y = dy_s.rolling(k).sum()
+        sum_xx = (x_s**2).rolling(k).sum()
+        sum_xy = (x_s * dy_s).rolling(k).sum()
+        sum_yy = (dy_s**2).rolling(k).sum()
         
-        # Helper for vectorized beta, alpha
-        denom = lookback * sum_xx - sum_x**2
-        
-        # Handle division by zero
+        denom = k * sum_xx - sum_x**2
         valid = np.abs(denom) > 1e-10
-        beta = np.zeros_like(denom)
-        alpha = np.zeros_like(denom)
         
-        beta[valid] = (lookback * sum_xy[valid] - sum_x[valid] * sum_y[valid]) / denom[valid]
-        alpha[valid] = (sum_y[valid] - beta[valid] * sum_x[valid]) / lookback
+        beta = pd.Series(0.0, index=dy_s.index)
+        alpha = pd.Series(0.0, index=dy_s.index)
         
-        # SE calculation requires RSS
-        rss = (sum_yy + 
-               alpha**2 * lookback + 
-               beta**2 * sum_xx + 
-               2 * alpha * beta * sum_x - 
-               2 * alpha * sum_y - 
-               2 * beta * sum_xy)
-               
-        # Ensure positive RSS (floating point errors)
-        rss = np.maximum(rss, 0)
+        beta[valid] = (k * sum_xy[valid] - sum_x[valid] * sum_y[valid]) / denom[valid]
+        alpha[valid] = (sum_y[valid] - beta[valid] * sum_x[valid]) / k
         
-        sigma2 = rss / max(lookback - 2, 1)
+        rss = (sum_yy - alpha * sum_y - beta * sum_xy).clip(lower=0.0)
+        sigma2 = rss / max(k - 2, 1)
+        se = np.sqrt(sigma2 * k / np.maximum(denom, 1e-10))
         
-        # SE = sqrt(sigma2 * n / denom) = sqrt(sigma2 * lookback / denom)
-        se = np.sqrt(sigma2 * lookback / np.maximum(denom, 1e-10))
+        tau = np.zeros_like(beta.values)
+        mask = (se > 1e-10).values
+        tau[mask] = beta.values[mask] / se.values[mask]
         
-        # t-stat (tau)
-        tau = np.zeros_like(beta)
-        mask = se > 1e-10
-        tau[mask] = beta[mask] / se[mask]
+        tau_s = pd.Series(tau).fillna(0.0)
         
-        # Convert to series for smoothing
-        tau_s = pd.Series(tau).fillna(0)
+        # Pine Script: tauADF := ta.sma(tauADF, 10)
+        tau_sma = tau_s.rolling(10).mean().fillna(tau_s)
         
-        # Verify: "tauADF := ta.sma(tauADF, 10)"
-        tau_sma = tau_s.ewm(span=10, min_periods=1).mean()
-        
-        # "tauADF_smooth = ta.ema(tauADF, 50)"
-        # EMA usually handles NaNs/start better than SMA
-        tau_smooth = tau_sma.ewm(span=50, adjust=False, min_periods=1).mean()
+        # Pine Script: tauADF_smooth = ta.ema(tauADF, 50)
+        tau_smooth = tau_sma.ewm(span=50, adjust=False).mean()
         
         hist = tau_sma - tau_smooth
                 

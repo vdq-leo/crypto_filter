@@ -13,6 +13,13 @@ services:
       - API_BASE_URL=http://127.0.0.1:3000/api
     volumes:
       - ./data_cache:/app/data_cache
+      - ./app.py:/app/app.py
+      - ./main.py:/app/main.py
+      - ./www:/app/www
+      - ./modules:/app/modules
+      - ./src:/app/src
+      - ./api:/app/api
+      - ./entrypoint.sh:/app/entrypoint.sh
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/ || exit 1"]
       interval: 15s

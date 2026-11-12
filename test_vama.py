@@ -58,7 +58,7 @@ def test_vama_calculation():
     # Verify that calculate_all_indicators exports all VAMA metrics
     adv_df = MetricsEngine.calculate_all_indicators(df, tail_only=True)
     expected_cols = [
-        'vama', 'vama_raw', 'vama_dist', 'vama_weight', 'vama_span',
+        'vama', 'vama_raw', 'price_vama', 'vama_dist', 'vama_weight', 'vama_span',
         'vama_vol', 'vama_target_vol', 'vama_signal', 'vama_pos',
         'vama_current_ret', 'vama_long_thr', 'vama_short_thr'
     ]

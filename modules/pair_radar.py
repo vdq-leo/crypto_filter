@@ -275,23 +275,27 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         ), row=1, col=1)
 
         # Bollinger Bands
+        basis = df['ema'] if 'ema' in df.columns else (df['ma'] if 'ma' in df.columns else df['close'].rolling(window).mean())
+        bb_upper = df['bb_upper'] if 'bb_upper' in df.columns else (df['bb_up'] if 'bb_up' in df.columns else basis)
+        bb_lower = df['bb_lower'] if 'bb_lower' in df.columns else (df['bb_dn'] if 'bb_dn' in df.columns else basis)
+
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=df['ema'],
+            y=basis,
             name="Basis",
             line=dict(color="rgba(255,0,0,0.8)", width=2),
         ), row=1, col=1)
         
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=df['bb_upper'],
+            y=bb_upper,
             name="BB Upper",
             line=dict(color="rgba(0,255,255,0.5)", width=1),
         ), row=1, col=1)
 
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=df['bb_lower'],
+            y=bb_lower,
             name="BB Lower",
             line=dict(color="rgba(0,255,255,0.5)", width=1),
             fill='tonexty',
@@ -645,7 +649,7 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
     @render_widget
     def pair_comp_chart():
         df = pair_data.get()
-        if df.empty or "cum_ret_a" not in df.columns or "cum_ret_b" not in df.columns:
+        if df.empty or "log_ret_a" not in df.columns or "log_ret_b" not in df.columns:
             return None
 
         window = input.rolling_window()

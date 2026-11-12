@@ -13,7 +13,6 @@ import faicons as fa
 from shinywidgets import output_widget, render_widget
 from src.config import APP_TITLE, APP_ICON, WELCOME_TITLE, WELCOME_TEXT, SIDEBAR_INFO, THEME, BG_COLOR, TRADINGVIEW_URL
 import requests
-import webbrowser
 
 from modules.data_loader import data_loader_ui, data_loader_server
 from modules.market_radar import market_radar_ui, market_radar_server
@@ -31,7 +30,56 @@ from datetime import datetime, timedelta
 app_ui = ui.page_navbar(
     ui.head_content(
         ui.include_css(Path(__file__).parent / "www" / "custom.css"),
+        ui.tags.link(
+            rel="icon",
+            type="image/svg+xml",
+            href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%20width%3D%2232%22%20height%3D%2232%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%226%22%20fill%3D%22%230b3d91%22%2F%3E%3Ctext%20x%3D%2216%22%20y%3D%2221.5%22%20font-family%3D%22ui-monospace%2C%20SFMono-Regular%2C%20Menlo%2C%20Monaco%2C%20Consolas%2C%20monospace%22%20font-size%3D%2215%22%20font-weight%3D%22900%22%20fill%3D%22%23ffffff%22%20text-anchor%3D%22middle%22%20letter-spacing%3D%22-0.5%22%3ECF%3C%2Ftext%3E%3C%2Fsvg%3E",
+        ),
+        ui.tags.title("QUANT_TOOLS"),
         ui.tags.script("""
+            // --- Auto-Reconnect & Keepalive Heartbeat ---
+            $(document).on('shiny:connected', function() {
+                if (window.Shiny && window.Shiny.shinyapp) {
+                    window.Shiny.shinyapp.$allowReconnect = "force";
+                }
+            });
+
+            // WebSocket keep-alive heartbeat every 15s to prevent browser/proxy idle disconnects
+            setInterval(function() {
+                if (window.Shiny && window.Shiny.setInputValue) {
+                    window.Shiny.setInputValue('__heartbeat__', Date.now(), {priority: 'event'});
+                }
+            }, 15000);
+
+            // Reconnect immediately on tab refocus or when network returns online
+            window.addEventListener('focus', function() {
+                if (window.Shiny && window.Shiny.shinyapp && !window.Shiny.shinyapp.isConnected()) {
+                    try { window.Shiny.shinyapp.reconnect(); } catch (e) {}
+                }
+            });
+
+            window.addEventListener('online', function() {
+                if (window.Shiny && window.Shiny.shinyapp && !window.Shiny.shinyapp.isConnected()) {
+                    try { window.Shiny.shinyapp.reconnect(); } catch (e) {}
+                }
+            });
+
+            // Auto-reconnect on disconnect instead of staying stuck on gray screen
+            $(document).on('shiny:disconnected', function() {
+                let retryCount = 0;
+                const retryTimer = setInterval(function() {
+                    retryCount++;
+                    if (window.Shiny && window.Shiny.shinyapp) {
+                        if (window.Shiny.shinyapp.isConnected()) {
+                            clearInterval(retryTimer);
+                        } else {
+                            try { window.Shiny.shinyapp.reconnect(); } catch (e) {}
+                        }
+                    }
+                    if (retryCount > 30) clearInterval(retryTimer);
+                }, 1500);
+            });
+
             document.addEventListener("keydown", function(e) {
                 const decomp_n_assets_box = document.querySelector('input[id$="decomp_n_assets"]');
                 if (decomp_n_assets_box && document.activeElement === decomp_n_assets_box && e.key === "Enter") {
@@ -43,6 +91,59 @@ app_ui = ui.page_navbar(
             });
             $(document).on('bslib.card.collapse', function(event) {
                 Shiny.setInputValue('card_expanded', false);
+            });
+
+            // Quick TradingView launcher for navbar ticker input
+            $(document).on('click', '#btn_quick_go', function(e) {
+                const selectEl = $('#quick_symbol');
+                let symbols = [];
+                if (selectEl.length && selectEl[0].selectize) {
+                    const val = selectEl[0].selectize.getValue();
+                    symbols = Array.isArray(val) ? val : (val ? [val] : []);
+                } else if (selectEl.length) {
+                    const val = selectEl.val();
+                    symbols = Array.isArray(val) ? val : (val ? [val] : []);
+                }
+
+                if (!symbols || symbols.length === 0) return;
+
+                let interval = '1h';
+                const radarIntEl = $('#radar_interval');
+                if (radarIntEl.length && radarIntEl.val()) {
+                    interval = radarIntEl.val();
+                }
+
+                const tv_intervals = {
+                    '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
+                    '1h': '60', '2h': '120', '4h': '240', '6h': '360', '8h': '480', '12h': '720',
+                    '1d': 'D', '3d': '3D', '1w': 'W'
+                };
+                const tv_int = tv_intervals[interval] || '60';
+
+                symbols.forEach(function(sym) {
+                    if (!sym) return;
+                    const clean = String(sym).trim().replace(/^BINANCE:/i, '').replace(/\\.P$/i, '');
+                    const url = 'https://www.tradingview.com/chart/?symbol=BINANCE:' + clean + '.P&interval=' + tv_int;
+                    window.open(url, '_blank');
+                });
+
+                if (selectEl.length && selectEl[0].selectize) {
+                    selectEl[0].selectize.clear();
+                }
+            });
+
+            // Also launch if Enter is pressed and an item is already selected
+            $(document).on('keydown', '.selectize-input input', function(e) {
+                if (e.key === 'Enter') {
+                    const selectEl = $('#quick_symbol');
+                    const selectize = selectEl.length && selectEl[0].selectize;
+                    if (selectize && !selectize.isOpen) {
+                        const val = selectize.getValue();
+                        if (val && (Array.isArray(val) ? val.length > 0 : String(val).length > 0)) {
+                            $('#btn_quick_go').click();
+                        }
+                    }
+                }
             });
         """)
     ),
@@ -226,29 +327,7 @@ def server(input, output, session):
     @reactive.Effect
     @reactive.event(input.btn_quick_go)
     def _quick_link():
-        symbols = input.quick_symbol()
-        if not symbols:
-            return
-            
-        try:
-            interval = input.radar_interval()
-        except:
-            interval = "1h"
-
-        # TradingView interval mapping
-        tv_intervals = {
-            '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
-            '1h': '60', '2h': '120', '4h': '240', '6h': '360', '8h': '480', '12h': '720',
-            '1d': 'D', '3d': '3D', '1w': 'W'
-        }
-        tv_int = tv_intervals.get(interval, '60')
-
-        if isinstance(symbols, (list, tuple)):
-            for sym in symbols:
-                url = f"{TRADINGVIEW_URL}?symbol=BINANCE:{sym}.P&interval={tv_int}"
-                webbrowser.open(url)
-        
-        # Clear selection after opening
+        # Clear server-side selection after launch
         ui.update_selectize("quick_symbol", selected=[])
 
     data_loader_server(input, output, session)
@@ -261,4 +340,4 @@ def server(input, output, session):
     activity_logs_server(input, output, session)
     asset_filter_server(input, output, session, global_universe)
 
-app = App(app_ui, server)
+app = App(app_ui, server, static_assets=Path(__file__).parent / "www")

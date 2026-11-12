@@ -13,7 +13,9 @@ Launch the Shiny application:
 docker compose up -d
 ```
 
-- **Shiny Dashboard URL**: [http://localhost:8000](http://localhost:8000)
+- **Shiny Dashboard Local Links**:
+  - [http://cryptofilter.localhost](http://cryptofilter.localhost) (via local reverse proxy on port 80)
+  - [http://localhost:8000](http://localhost:8000) (direct port access)
 
 To stop the container:
 ```bash

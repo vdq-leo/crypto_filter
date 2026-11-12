@@ -49,18 +49,31 @@ def get_kde_path(vals, ranks):
 def generate_pair_radar(req: PairRequest):
     try:
         df_a = manager.load_data(req.symbol_a, req.interval, auto_sync=False)
-        if df_a is None or df_a.empty:
+        if df_a is None or df_a.empty or len(df_a) < req.rolling_window:
             df_a = manager.load_data(req.symbol_a, req.interval, auto_sync=True)
             
         df_b = manager.load_data(req.symbol_b, req.interval, auto_sync=False)
-        if df_b is None or df_b.empty:
+        if df_b is None or df_b.empty or len(df_b) < req.rolling_window:
             df_b = manager.load_data(req.symbol_b, req.interval, auto_sync=True)
         
         if df_a is None or df_b is None or df_a.empty or df_b.empty:
             raise HTTPException(status_code=400, detail="Data missing for symbols")
-            
-        df_a = df_a.set_index("open_time")
-        df_b = df_b.set_index("open_time")
+
+        df_a = df_a.copy()
+        df_b = df_b.copy()
+
+        df_a["open_time"] = pd.to_datetime(df_a["open_time"]).astype("datetime64[ns]")
+        df_b["open_time"] = pd.to_datetime(df_b["open_time"]).astype("datetime64[ns]")
+
+        if req.interval in ['1h', '2h', '4h', '6h', '8h', '12h']:
+            df_a["open_time"] = df_a["open_time"].dt.floor('h')
+            df_b["open_time"] = df_b["open_time"].dt.floor('h')
+        elif req.interval in ['1d', '3d', '1w']:
+            df_a["open_time"] = df_a["open_time"].dt.normalize()
+            df_b["open_time"] = df_b["open_time"].dt.normalize()
+
+        df_a = df_a.drop_duplicates(subset=["open_time"], keep="last").set_index("open_time")
+        df_b = df_b.drop_duplicates(subset=["open_time"], keep="last").set_index("open_time")
         common = df_a.index.intersection(df_b.index)
         
         if len(common) < req.rolling_window:
@@ -121,6 +134,10 @@ def generate_pair_radar(req: PairRequest):
         synthetic["std"] = synthetic["close"].rolling(window=req.rolling_window).std()
         synthetic["bb_up"] = synthetic["ma"] + (synthetic["std"] * 1.8)
         synthetic["bb_dn"] = synthetic["ma"] - (synthetic["std"] * 1.8)
+        # Aliases for UI chart compatibility
+        synthetic["ema"] = synthetic["ma"]
+        synthetic["bb_upper"] = synthetic["bb_up"]
+        synthetic["bb_lower"] = synthetic["bb_dn"]
         synthetic = synthetic.bfill()
 
         z_local = calculate_rolling_zscore(synthetic["close"], req.rolling_window)
