@@ -378,14 +378,22 @@ def market_radar_server(input, output, session, global_interval, global_universe
                 df[x] = pd.to_numeric(df[x], errors='coerce').rank(pct=True)
             elif x_norm == "Z-Score":
                 series = pd.to_numeric(df[x], errors='coerce')
-                df[x] = (series - series.mean()) / series.std()
+                std_x = series.std()
+                if std_x and std_x > 1e-9:
+                    df[x] = (series - series.mean()) / std_x
+                else:
+                    df[x] = 0.0
 
         if y in df.columns:
             if y_norm == "Rank":
                 df[y] = pd.to_numeric(df[y], errors='coerce').rank(pct=True)
             elif y_norm == "Z-Score":
                 series = pd.to_numeric(df[y], errors='coerce')
-                df[y] = (series - series.mean()) / series.std()
+                std_y = series.std()
+                if std_y and std_y > 1e-9:
+                    df[y] = (series - series.mean()) / std_y
+                else:
+                    df[y] = 0.0
             
         return df
 
@@ -396,6 +404,8 @@ def market_radar_server(input, output, session, global_interval, global_universe
             return None
             
         x, y = input.x_axis(), input.y_axis()
+        if x not in plot_df.columns or y not in plot_df.columns:
+            return None
         
         try:
             # Ensure selected columns are numeric
@@ -406,7 +416,7 @@ def market_radar_server(input, output, session, global_interval, global_universe
             mask = np.isfinite(reg_x) & np.isfinite(reg_y)
             reg_x, reg_y = reg_x[mask], reg_y[mask]
             
-            if len(reg_x) > 1:
+            if len(reg_x) > 1 and np.ptp(reg_x) > 1e-9:
                 slope, intercept, r_value, p_value, std_err = stats.linregress(reg_x, reg_y)
                 
                 # Generate line points
@@ -431,7 +441,7 @@ def market_radar_server(input, output, session, global_interval, global_universe
 
     @render_widget
     def snapshot_chart():
-        plot_df = filtered_snapshot_df()
+        plot_df = filtered_snapshot_df().copy()
         if plot_df.empty:
             # Return empty figure with message if possible, or just empty
             fig = go.Figure()
@@ -441,15 +451,27 @@ def market_radar_server(input, output, session, global_interval, global_universe
 
         x, y, z = input.x_axis(), input.y_axis(), input.z_axis()
         
-        # Ensure selected columns are numeric and handle NaNs for Plotly
+        # Ensure selected axes exist in plot_df and are clean numeric series
         for col in [x, y]:
-            if col in plot_df.columns:
-                plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce').fillna(0)
-        if z != "None" and z in plot_df.columns:
-            plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0)
-            # px.scatter size must be positive
-            z_norm = (plot_df[z] - plot_df[z].min()) / (plot_df[z].max() - plot_df[z].min())
-            plot_df['z_marker_size'] = z_norm + 1
+            if col not in plot_df.columns:
+                plot_df[col] = 0.0
+            else:
+                plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce').fillna(0.0)
+
+        if z != "None":
+            if z not in plot_df.columns:
+                plot_df[z] = 0.0
+            else:
+                plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0.0)
+            
+            denom = plot_df[z].max() - plot_df[z].min()
+            if denom > 1e-9:
+                z_norm = (plot_df[z] - plot_df[z].min()) / denom
+                plot_df['z_marker_size'] = (z_norm * 14 + 6).fillna(8.0)
+            else:
+                plot_df['z_marker_size'] = 8.0
+            
+            plot_df['z_marker_size'] = plot_df['z_marker_size'].replace([np.inf, -np.inf], np.nan).fillna(8.0)
             
             fig = px.scatter(
                 plot_df, x=x, y=y, size='z_marker_size', color=z,
@@ -466,7 +488,7 @@ def market_radar_server(input, output, session, global_interval, global_universe
                 template="plotly_dark",
                 custom_data=['symbol']  # Add symbol to custom data for click events
             )
-            fig.update_traces(marker=dict(color='#00F5FF'))
+            fig.update_traces(marker=dict(color='#00F5FF', size=8))
             
         fig.update_layout(
             margin=dict(l=50, r=50, t=50, b=50),

@@ -48,6 +48,9 @@ def get_kde_path(vals, ranks):
 @router.post("/generate")
 def generate_pair_radar(req: PairRequest):
     try:
+        if req.symbol_a == req.symbol_b:
+            raise HTTPException(status_code=400, detail="Asset A and Asset B must be different symbols")
+
         df_a = manager.load_data(req.symbol_a, req.interval, auto_sync=False)
         if df_a is None or df_a.empty or len(df_a) < req.rolling_window:
             df_a = manager.load_data(req.symbol_a, req.interval, auto_sync=True)
@@ -56,8 +59,11 @@ def generate_pair_radar(req: PairRequest):
         if df_b is None or df_b.empty or len(df_b) < req.rolling_window:
             df_b = manager.load_data(req.symbol_b, req.interval, auto_sync=True)
         
-        if df_a is None or df_b is None or df_a.empty or df_b.empty:
-            raise HTTPException(status_code=400, detail="Data missing for symbols")
+        missing = []
+        if df_a is None or df_a.empty: missing.append(req.symbol_a)
+        if df_b is None or df_b.empty: missing.append(req.symbol_b)
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Data missing or unavailable for symbol(s): {', '.join(missing)}")
 
         df_a = df_a.copy()
         df_b = df_b.copy()
@@ -76,10 +82,12 @@ def generate_pair_radar(req: PairRequest):
         df_b = df_b.drop_duplicates(subset=["open_time"], keep="last").set_index("open_time")
         common = df_a.index.intersection(df_b.index)
         
-        if len(common) < req.rolling_window:
-            raise HTTPException(status_code=400, detail="Insufficient common data")
+        if len(common) < 30:
+            raise HTTPException(status_code=400, detail=f"Insufficient common data between {req.symbol_a} and {req.symbol_b}: only {len(common)} overlapping points found (minimum 30 required).")
             
-        common = common[-(req.rolling_window + req.pair_window):]
+        effective_rolling = min(req.rolling_window, len(common) - 2)
+        total_bars = min(len(common), effective_rolling + req.pair_window)
+        common = common[-total_bars:]
         df_a = df_a.loc[common].copy()
         df_b = df_b.loc[common].copy()
 
@@ -94,8 +102,8 @@ def generate_pair_radar(req: PairRequest):
         df_b[price_cols] = np.log(df_b[price_cols])
 
         synthetic = pd.DataFrame(index=common)
-        if df_b["close"].std() == 0:
-            raise HTTPException(status_code=400, detail="Asset B has zero variance")
+        if df_b["close"].std() == 0 or np.ptp(df_b["close"].values) < 1e-9:
+            raise HTTPException(status_code=400, detail=f"Asset B ({req.symbol_b}) has zero variance")
 
         slope, intercept, r_val, p_val, std_err = stats.linregress(df_b["close"], df_a["close"])
         beta = slope
@@ -130,21 +138,22 @@ def generate_pair_radar(req: PairRequest):
 
         r2 = r_val**2
         # Bollinger Bands for synthetic spread
-        synthetic["ma"] = synthetic["close"].rolling(window=req.rolling_window).mean()
-        synthetic["std"] = synthetic["close"].rolling(window=req.rolling_window).std()
+        calc_window = min(effective_rolling, max(len(synthetic) - 2, 5))
+        synthetic["ma"] = synthetic["close"].rolling(window=calc_window, min_periods=1).mean()
+        synthetic["std"] = synthetic["close"].rolling(window=calc_window, min_periods=1).std().fillna(1e-9)
         synthetic["bb_up"] = synthetic["ma"] + (synthetic["std"] * 1.8)
         synthetic["bb_dn"] = synthetic["ma"] - (synthetic["std"] * 1.8)
         # Aliases for UI chart compatibility
         synthetic["ema"] = synthetic["ma"]
         synthetic["bb_upper"] = synthetic["bb_up"]
         synthetic["bb_lower"] = synthetic["bb_dn"]
-        synthetic = synthetic.bfill()
+        synthetic = synthetic.bfill().ffill().fillna(0)
 
-        z_local = calculate_rolling_zscore(synthetic["close"], req.rolling_window)
-        synthetic["zscore"] = z_local
+        z_local = calculate_rolling_zscore(synthetic["close"], calc_window)
+        synthetic["zscore"] = z_local.fillna(0)
         
-        synthetic["corr_pearson"] = synthetic["log_ret_a"].rolling(req.rolling_window).corr(synthetic["log_ret_b"])
-        synthetic["corr_pearson_price"] = synthetic["price_a"].rolling(req.rolling_window).corr(synthetic["price_b"])
+        synthetic["corr_pearson"] = synthetic["log_ret_a"].rolling(calc_window, min_periods=1).corr(synthetic["log_ret_b"]).fillna(0)
+        synthetic["corr_pearson_price"] = synthetic["price_a"].rolling(calc_window, min_periods=1).corr(synthetic["price_b"]).fillna(0)
         
         # --- COPULA CALCULATIONS ---
         copula_data = {}
@@ -244,9 +253,9 @@ def generate_pair_radar(req: PairRequest):
             "metrics": {
                 "Coefficient": np_safe(slope),
                 "VolRatio": np_safe(vol_Ratio),
-                "HalfLife": np_safe(-np.log(2) / np.polyfit(residuals[-req.rolling_window:-1], np.diff(residuals[-req.rolling_window:]), 1)[0] if len(residuals) >= req.rolling_window and np.polyfit(residuals[-req.rolling_window:-1], np.diff(residuals[-req.rolling_window:]), 1)[0] < 0 else np.nan),
-                "SpreadVol": np_safe(np.std(residuals[-req.rolling_window:]) * np.sqrt(MetricsEngine.get_annual_scaling(req.interval))),
-                "BetaStability": np_safe(np.nanstd((pd.Series(y).rolling(req.rolling_window).cov(pd.Series(x)) / pd.Series(x).rolling(req.rolling_window).var().replace(0, 1e-9)).values) if len(y) > req.rolling_window else np.nan),
+                "HalfLife": np_safe(-np.log(2) / np.polyfit(residuals[-effective_rolling:-1], np.diff(residuals[-effective_rolling:]), 1)[0] if len(residuals) >= effective_rolling and len(residuals) > 2 and np.polyfit(residuals[-effective_rolling:-1], np.diff(residuals[-effective_rolling:]), 1)[0] < 0 else np.nan),
+                "SpreadVol": np_safe(np.std(residuals[-effective_rolling:]) * np.sqrt(MetricsEngine.get_annual_scaling(req.interval))),
+                "BetaStability": np_safe(np.nanstd((pd.Series(y).rolling(effective_rolling).cov(pd.Series(x)) / pd.Series(x).rolling(effective_rolling).var().replace(0, 1e-9)).values) if len(y) > effective_rolling else np.nan),
                 "P_Correlation": np_safe(np.corrcoef(x, y)[0, 1]),
                 "R_Correlation": np_safe(np.corrcoef(synthetic["log_ret_a"].dropna(), synthetic["log_ret_b"].dropna())[0, 1]),
                 "ADF_P": np_safe(adf_p),
@@ -256,7 +265,10 @@ def generate_pair_radar(req: PairRequest):
             "copula": copula_data,
             "comp": comp_data
         })
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Pair radar generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class CopulaRequest(BaseModel):

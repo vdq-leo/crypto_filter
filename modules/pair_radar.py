@@ -35,8 +35,8 @@ def pair_radar_ui():
             ui.h4("Pair Analysis"),
             ui.input_action_button("btn_gen_pair", "Generate Radar", class_="btn-primary w-100 mt-3"),
             ui.input_select("pair_interval", "Timeframe", choices=AVAILABLE_INTERVALS, selected="1h"),
-            ui.input_selectize("symbol_a", "Asset A", choices=[]),
-            ui.input_selectize("symbol_b", "Asset B", choices=[]),
+            ui.input_selectize("symbol_a", "Asset A", choices=[], options={"create": False}),
+            ui.input_selectize("symbol_b", "Asset B", choices=[], options={"create": False}),
             ui.input_select("pair_mode", "Generation Mode", 
                            choices={"ratio": "Ratio", "spread": "Spread"}, selected="spread"),
             ui.hr(),
@@ -235,25 +235,47 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
                     
                     p.set(100, message="Complete")
                 else:
-                    ui.notification_show(f"Calculation error: {res.text}", type="error")
+                    try:
+                        err_msg = res.json().get("detail", res.text)
+                    except Exception:
+                        err_msg = res.text
+                    ui.notification_show(f"Calculation error: {err_msg}", type="error")
             except Exception as e:
                 logger.log("Pair Radar", "ERROR", f"API Error: {e}")
                 ui.notification_show(f"API Connection error: {str(e)}", type="error")
 
     @render_widget
     def pair_main_chart():
-        df = pair_data.get()
+        df = pair_data.get().copy()
         if df.empty:
             return None
 
-        df.index = pd.to_datetime(df.index)
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
         df.index = df.index.strftime("%Y-%m-%d %H:%M")
-        window = input.rolling_window()
+        window = int(input.rolling_window() or 320)
+        p_window = int(input.pair_window() or 2000)
 
-        df = df.tail(input.pair_window() + window)
+        df = df.tail(p_window)
 
+        # Standardize price columns
+        for col in ['open', 'high', 'low', 'close']:
+            if col not in df.columns:
+                df[col] = 0.0
+            else:
+                df[col] = _sanitize(pd.to_numeric(df[col], errors='coerce'))
 
-        df = df.tail(input.pair_window())
+        # Standardize indicator columns to avoid any KeyError
+        if 'ema' not in df.columns:
+            df['ema'] = df['ma'] if 'ma' in df.columns else df['close'].rolling(window, min_periods=1).mean()
+        if 'bb_upper' not in df.columns:
+            df['bb_upper'] = df['bb_up'] if 'bb_up' in df.columns else df['ema']
+        if 'bb_lower' not in df.columns:
+            df['bb_lower'] = df['bb_dn'] if 'bb_dn' in df.columns else df['ema']
+
+        basis = _sanitize(pd.to_numeric(df['ema'], errors='coerce'))
+        bb_upper = _sanitize(pd.to_numeric(df['bb_upper'], errors='coerce'))
+        bb_lower = _sanitize(pd.to_numeric(df['bb_lower'], errors='coerce'))
 
         fig = make_subplots(
             rows=3, cols=1,
@@ -275,10 +297,6 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         ), row=1, col=1)
 
         # Bollinger Bands
-        basis = df['ema'] if 'ema' in df.columns else (df['ma'] if 'ma' in df.columns else df['close'].rolling(window).mean())
-        bb_upper = df['bb_upper'] if 'bb_upper' in df.columns else (df['bb_up'] if 'bb_up' in df.columns else basis)
-        bb_lower = df['bb_lower'] if 'bb_lower' in df.columns else (df['bb_dn'] if 'bb_dn' in df.columns else basis)
-
         fig.add_trace(go.Scatter(
             x=df.index,
             y=basis,
@@ -303,7 +321,7 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         ), row=1, col=1)
 
         # Z-score
-        z = _sanitize(df['zscore'])
+        z = _sanitize(pd.to_numeric(df['zscore'], errors='coerce')) if 'zscore' in df.columns else pd.Series(0.0, index=df.index)
         fig.add_trace(go.Scatter(
             x=df.index,
             y=z,
@@ -317,16 +335,18 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         fig.add_hline(y=-2.0, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
 
         # Correlation plots (Row 3)
+        corr_ret = _sanitize(pd.to_numeric(df['corr_pearson'], errors='coerce')) if 'corr_pearson' in df.columns else pd.Series(0.0, index=df.index)
+        corr_price = _sanitize(pd.to_numeric(df['corr_pearson_price'], errors='coerce')) if 'corr_pearson_price' in df.columns else pd.Series(0.0, index=df.index)
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=_sanitize(df['corr_pearson']),
+            y=corr_ret,
             name="Pearson (Ret)",
             line=dict(color="#FFD700", width=1.5)
         ), row=3, col=1)
 
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=_sanitize(df['corr_pearson_price']),
+            y=corr_price,
             name="Pearson (Price)",
             line=dict(color="#FFA500", width=1.5)
         ), row=3, col=1)
@@ -413,16 +433,20 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         if mode == "price":
             # Note: price_a in synthetic is log(price)
             # Use full df for EMA calculation to avoid edge effects
-            p_a_full = np.exp(df["price_a"])
-            p_b_full = np.exp(df["price_b"])
+            if "price_a" not in df.columns or "price_b" not in df.columns:
+                return None
+            p_a_full = np.exp(pd.to_numeric(df["price_a"], errors='coerce').fillna(0.0))
+            p_b_full = np.exp(pd.to_numeric(df["price_b"], errors='coerce').fillna(0.0))
 
             if input.copula_stationarize():
                 try:
                     ew = max(int(input.copula_ema_window() or 20), 2)
                 except (TypeError, ValueError):
                     ew = 20
-                x_full = p_a_full / p_a_full.ewm(span=ew).mean()
-                y_full = p_b_full / p_b_full.ewm(span=ew).mean()
+                a_ewm = p_a_full.ewm(span=ew).mean().replace(0, 1e-9)
+                b_ewm = p_b_full.ewm(span=ew).mean().replace(0, 1e-9)
+                x_full = p_a_full / a_ewm
+                y_full = p_b_full / b_ewm
                 title_suffix = f" (Stationary Price, {ew} EMA)"
             else:
                 x_full = p_a_full
@@ -432,6 +456,8 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
             x_raw = x_full.tail(w).values
             y_raw = y_full.tail(w).values
         else:
+            if "log_ret_a" not in df.columns or "log_ret_b" not in df.columns:
+                return None
             df_plot = df.tail(w).copy()
             df_plot = df_plot.dropna(subset=["log_ret_a", "log_ret_b"])
             if len(df_plot) < 2 or r_window < 2:
@@ -665,7 +691,8 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         ret_b = df_plot["log_ret_b"].dropna()
 
         # Calculate beta (vol ratio) for better visual scaling
-        beta = ret_a.std() / ret_b.std()
+        b_std = ret_b.std()
+        beta = (ret_a.std() / b_std) if b_std and b_std > 1e-9 else 1.0
 
         # Scale cumulative return of A to match B visually
         cum_ret_a_scaled = (ret_a / beta).cumsum()
@@ -686,13 +713,16 @@ def pair_radar_server(input, output, session, global_interval, *args, **kwargs):
         except (TypeError, ValueError):
             ew_comp = 20
             
-        p_a_full = np.exp(df["price_a"])
-        p_b_full = np.exp(df["price_b"])
-        stat_a_full = p_a_full / p_a_full.ewm(span=ew_comp).mean()
-        stat_b_full = p_b_full / p_b_full.ewm(span=ew_comp).mean()
-        
-        stat_a = stat_a_full.tail(input.pair_window()).values
-        stat_b = stat_b_full.tail(input.pair_window()).values
+        if "price_a" in df.columns and "price_b" in df.columns:
+            p_a_full = np.exp(pd.to_numeric(df["price_a"], errors='coerce').fillna(0.0))
+            p_b_full = np.exp(pd.to_numeric(df["price_b"], errors='coerce').fillna(0.0))
+            stat_a_full = p_a_full / p_a_full.ewm(span=ew_comp).mean().replace(0, 1e-9)
+            stat_b_full = p_b_full / p_b_full.ewm(span=ew_comp).mean().replace(0, 1e-9)
+            stat_a = stat_a_full.tail(input.pair_window()).values
+            stat_b = stat_b_full.tail(input.pair_window()).values
+        else:
+            stat_a = np.zeros(len(df_plot))
+            stat_b = np.zeros(len(df_plot))
 
         # --- Row 1: Performance Comparison ---
         mode = input.comp_price_mode()

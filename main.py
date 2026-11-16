@@ -16,9 +16,18 @@ def _sync_mandatory_batch():
     try:
         manager = get_manager()
         symbols = list(MANDATORY_CRYPTO)
-        with ThreadPoolExecutor(max_workers=5) as pool:
+        try:
+            top_syms = manager.get_universe(top_n=50)
+            if top_syms:
+                for s in top_syms:
+                    if s not in symbols:
+                        symbols.append(s)
+        except Exception:
+            pass
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
             futures = []
-            for sym in symbols:
+            for sym in symbols[:40]:
                 for interval in SYNC_INTERVALS:
                     futures.append(pool.submit(manager.load_data, sym, interval, auto_sync=True))
             for f in futures:
