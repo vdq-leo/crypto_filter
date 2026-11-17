@@ -526,9 +526,14 @@ def symbol_diagnostics_server(input, output, session, global_interval, *args, **
         d = diag_data.get()
         if not d: return go.Figure()
         
-        hist = d['fc_price']['hist']
-        fc = d['fc_price']['fc']
-        ci = d['fc_price']['ci']
+        hist = d.get('fc_price', {}).get('hist', [])
+        fc = d.get('fc_price', {}).get('fc', [])
+        ci = d.get('fc_price', {}).get('ci')
+        
+        if not hist or not fc: return go.Figure()
+
+        hist = np.array(hist, dtype=float)
+        fc = np.array(fc, dtype=float)
         
         x_hist = d['fc_price'].get('hist_ts', np.arange(len(hist)))
         x_fc = d['fc_price'].get('fc_ts', np.arange(len(hist), len(hist) + len(fc)))
@@ -538,14 +543,15 @@ def symbol_diagnostics_server(input, output, session, global_interval, *args, **
         fig.add_trace(go.Scatter(x=x_fc, y=fc, name="Forecast", line=dict(color="lime", dash="dot", width=1)))
         
         # CI
-        fig.add_trace(go.Scatter(
-            x=np.concatenate([x_fc, x_fc[::-1]]), # This will work fine with strings
-            y=np.concatenate([ci[:,1], ci[:,0][::-1]]),
-            fill='toself',
-            fillcolor='rgba(0, 255, 0, 0.1)',
-            line=dict(color='rgba(255,255,255,0)'),
-            name='(95%) CI'
-        ))
+        if ci is not None and len(ci) > 0:
+            fig.add_trace(go.Scatter(
+                x=np.concatenate([x_fc, x_fc[::-1]]), # This will work fine with strings
+                y=np.concatenate([ci[:,1], ci[:,0][::-1]]),
+                fill='toself',
+                fillcolor='rgba(0, 255, 0, 0.1)',
+                line=dict(color='rgba(255,255,255,0)'),
+                name='(95%) CI'
+            ))
         
         fig.update_layout(
             template="plotly_dark", legend=dict(orientation="h", yanchor="top", y=-0.2, xanchor="center", x=0.5), height=350, width=700)
@@ -556,14 +562,20 @@ def symbol_diagnostics_server(input, output, session, global_interval, *args, **
         d = diag_data.get()
         if not d: return go.Figure()
         
-        hist = d['fc_vol']['hist']
-        fc = d['fc_vol']['fc']
+        hist = d.get('fc_vol', {}).get('hist', [])
+        fc = d.get('fc_vol', {}).get('fc', [])
+        if not hist or not fc: return go.Figure()
 
-        diff = hist[-1] - fc[0]
+        hist = np.array(hist, dtype=float)
+        fc = np.array(fc, dtype=float)
+        if len(hist) == 0 or len(fc) == 0:
+            return go.Figure()
+
+        diff = float(hist[-1] - fc[0])
         
         x_hist = d['fc_vol'].get('hist_ts', np.arange(len(hist)))
         x_fc = d['fc_vol'].get('fc_ts', np.arange(len(hist), len(hist) + len(fc)))
-        fc = fc + diff
+        fc = np.maximum(fc + diff, 0)
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=x_hist, y=hist, name="Volatility (GARCH)", line=dict(color="orange")))
@@ -574,15 +586,14 @@ def symbol_diagnostics_server(input, output, session, global_interval, *args, **
 
         if fc_ci is not None:
             steps = np.arange(1, len(fc) + 1)
-
             k = 0.1
             scale = k * np.sqrt(steps)
 
             upper = fc + (fc_ci - fc) * scale
-            lower = fc - (fc_ci - fc) * scale
+            lower = np.maximum(fc - (fc_ci - fc) * scale, 0)
 
             fig.add_trace(go.Scatter(
-                x=np.concatenate([x_fc, x_fc[::-1]]), # This will work fine with strings
+                x=np.concatenate([x_fc, x_fc[::-1]]),
                 y=np.concatenate([upper, lower[::-1]]),
                 fill='toself',
                 fillcolor='rgba(255, 99, 71, 0.1)',

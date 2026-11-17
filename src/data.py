@@ -87,9 +87,18 @@ class BinanceFuturesFetcher:
     _universe_meta_last_fetch = 0.0
     _cache_expiry = 300.0  # 5 minutes cache
     _cache_lock = threading.Lock()
+    _rate_limited_until = 1794804260.0  # Cooldown timestamp for Binance 418/429
     
-    def __init__(self, rate_limit_delay: float = 0.05):
+    @classmethod
+    def is_rate_limited(cls) -> bool:
+        return time.time() < cls._rate_limited_until
+
+    def __init__(self, rate_limit_delay: float = 0.1):
         self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        })
         self.rate_limit_delay = rate_limit_delay
 
     def get_all_adl_risks(self) -> dict:
@@ -144,35 +153,145 @@ class BinanceFuturesFetcher:
             return {}
 
     def get_historical_stats_series(self, symbol: str, period: str, endpoint: str, limit: int = 30) -> list:
-        """Fetch historical series for Binance statistics endpoints"""
+        """Fetch and cache historical series for Binance statistics endpoints"""
+        now = time.time()
+        cache_key = ("series", symbol, period, endpoint, limit)
+        with BinanceFuturesFetcher._cache_lock:
+            if cache_key in BinanceFuturesFetcher._stats_cache:
+                ts, val = BinanceFuturesFetcher._stats_cache[cache_key]
+                if now - ts < BinanceFuturesFetcher._cache_expiry:
+                    return val
+
         try:
             params = {"symbol": symbol, "period": period, "limit": limit}
             data = self._request(endpoint, params=params)
-            return data if isinstance(data, list) else []
+            res = data if isinstance(data, list) else []
+            if res:
+                with BinanceFuturesFetcher._cache_lock:
+                    BinanceFuturesFetcher._stats_cache[cache_key] = (now, res)
+            return res
         except Exception as e:
             logger.error(f"Error fetching {endpoint} series for {symbol}: {e}")
             return []
             
     def get_historical_funding_rate(self, symbol: str, limit: int = 30) -> list:
-        """Fetch historical funding rates for a symbol"""
+        """Fetch and cache historical funding rates for a symbol"""
+        now = time.time()
+        cache_key = ("funding_series", symbol, limit)
+        with BinanceFuturesFetcher._cache_lock:
+            if cache_key in BinanceFuturesFetcher._stats_cache:
+                ts, val = BinanceFuturesFetcher._stats_cache[cache_key]
+                if now - ts < BinanceFuturesFetcher._cache_expiry:
+                    return val
+
         try:
             params = {"symbol": symbol, "limit": limit}
             data = self._request("/fapi/v1/fundingRate", params=params)
-            return data if isinstance(data, list) else []
+            res = data if isinstance(data, list) else []
+            if res:
+                with BinanceFuturesFetcher._cache_lock:
+                    BinanceFuturesFetcher._stats_cache[cache_key] = (now, res)
+            return res
         except Exception as e:
             logger.error(f"Error fetching funding rate series for {symbol}: {e}")
             return []
 
+    def get_source_series(self, symbol: str, source: str, interval: str = "1h", limit: int = 200) -> pd.Series:
+        """Fetch a clean time-indexed pd.Series for non-OHLCV market data sources (with disk+mem cache)."""
+        if symbol in ['QQQUSDT', 'SPYUSDT', 'XAUUSDT', 'XAGUSDT']:
+            return pd.Series(dtype=float)
+
+        period_mapping = {
+            '1m': '5m', '3m': '5m', '5m': '5m', '15m': '15m', '30m': '30m',
+            '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '6h',
+            '12h': '12h', '1d': '1d', '3d': '1d', '1w': '1d'
+        }
+        period = period_mapping.get(interval, '1h')
+        safe_limit = min(max(int(limit), 30), 500)
+
+        from src.cache_store import SeriesDiskCache
+        if not hasattr(BinanceFuturesFetcher, "_series_disk_cache"):
+            BinanceFuturesFetcher._series_disk_cache = SeriesDiskCache()
+        cached_s = BinanceFuturesFetcher._series_disk_cache.get(symbol, source, period)
+        if cached_s is not None and len(cached_s) >= min(safe_limit, 30):
+            return cached_s
+
+        source_map = {
+            'oi_usd': (self.OPEN_INTEREST_HIST, 'sumOpenInterestValue', 'timestamp'),
+            'oi_coins': (self.OPEN_INTEREST_HIST, 'sumOpenInterest', 'timestamp'),
+            'top_ls_pos': (self.TOP_LS_POSITION, 'longShortRatio', 'timestamp'),
+            'top_ls_acc': (self.TOP_LS_ACCOUNT, 'longShortRatio', 'timestamp'),
+            'global_ls': (self.GLOBAL_LS_ACCOUNT, 'longShortRatio', 'timestamp'),
+            'taker_bs': (self.TAKER_BUY_SELL, 'buySellRatio', 'timestamp'),
+        }
+
+        if source == 'funding':
+            raw = self.get_historical_funding_rate(symbol, limit=safe_limit)
+            val_key, ts_key = 'fundingRate', 'fundingTime'
+        elif source in source_map:
+            endpoint, val_key, ts_key = source_map[source]
+            raw = self.get_historical_stats_series(symbol, period, endpoint, limit=safe_limit)
+        else:
+            return pd.Series(dtype=float)
+
+        if not raw:
+            return pd.Series(dtype=float)
+
+        try:
+            df = pd.DataFrame(raw)
+            if val_key not in df.columns or ts_key not in df.columns:
+                return pd.Series(dtype=float)
+            df[ts_key] = pd.to_datetime(df[ts_key], unit='ms')
+            df[val_key] = pd.to_numeric(df[val_key], errors='coerce')
+            df = df.dropna(subset=[val_key]).sort_values(ts_key).drop_duplicates(subset=[ts_key])
+            s = pd.Series(df[val_key].values, index=df[ts_key])
+            BinanceFuturesFetcher._series_disk_cache.set(symbol, source, period, s)
+            return s
+        except Exception as e:
+            logger.debug(f"Error parsing {source} series for {symbol}: {e}")
+            return pd.Series(dtype=float)
+
     def _request(self, endpoint: str, params: dict = None) -> Union[dict, list]:
+        if time.time() < BinanceFuturesFetcher._rate_limited_until:
+            wait_sec = int(BinanceFuturesFetcher._rate_limited_until - time.time())
+            if wait_sec > 0 and wait_sec % 60 == 0:
+                logger.warning(f"Binance rate limit cooldown active: skipping {endpoint} (resumes in {wait_sec}s)")
+            return {}
+
         last_error = None
         for base in self.BASE_URLS:
             url = f"{base}{endpoint}"
             try:
                 response = self.session.get(url, params=params, timeout=8)
                 response.raise_for_status()
+                if self.rate_limit_delay > 0:
+                    time.sleep(self.rate_limit_delay)
                 return response.json()
             except requests.exceptions.HTTPError as e:
-                status_code = getattr(e.response, 'status_code', 'Unknown')
+                status_code = getattr(e.response, 'status_code', None)
+                if status_code in (418, 429):
+                    cooldown = 180  # Default 3 mins
+                    try:
+                        resp_json = e.response.json()
+                        msg = resp_json.get("msg", "")
+                        if "banned until" in msg:
+                            import re
+                            match = re.search(r"banned until\s+(\d+)", msg)
+                            if match:
+                                ban_ts = int(match.group(1)) / 1000.0
+                                cooldown = max(10, int(ban_ts - time.time()) + 3)
+                    except Exception:
+                        retry_after = e.response.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                cooldown = int(retry_after) + 3
+                            except ValueError:
+                                pass
+                    BinanceFuturesFetcher._rate_limited_until = time.time() + cooldown
+                    logger.critical(f"Binance IP rate-limited / banned (HTTP {status_code}). Backing off for {cooldown}s until {time.ctime(BinanceFuturesFetcher._rate_limited_until)}.")
+                    # All Binance mirrors share IP ban; immediately abort to avoid prolonging ban
+                    return {}
+
                 logger.warning(f"HTTP Error {status_code} for {url}: {e}. Retrying with mirror...")
                 last_error = e
                 continue
@@ -191,9 +310,17 @@ class BinanceFuturesFetcher:
             logger.error(f"All Binance endpoints failed for {endpoint}: {last_error}")
         return {}
 
-    def get_orderbooks(self, symbol: str) -> pd.DataFrame:
-        """Get orderbook for a single symbol"""
-        data = self._request(self.ORDERBOOK, {'symbol': symbol, 'limit': 1000})
+    def get_orderbooks(self, symbol: str, limit: int = 500) -> pd.DataFrame:
+        """Get and cache orderbook for a single symbol (180s TTL)"""
+        now = time.time()
+        cache_key = ("orderbook", symbol, limit)
+        with BinanceFuturesFetcher._cache_lock:
+            if cache_key in BinanceFuturesFetcher._stats_cache:
+                ts, val = BinanceFuturesFetcher._stats_cache[cache_key]
+                if now - ts < 180.0:
+                    return val
+
+        data = self._request(self.ORDERBOOK, {'symbol': symbol, 'limit': limit})
         if not data: return pd.DataFrame()
         
         bids = pd.DataFrame(data.get('bids', []), columns=['price', 'qty'], dtype=float)
@@ -201,7 +328,10 @@ class BinanceFuturesFetcher:
         
         bids['side'] = 'bid'
         asks['side'] = 'ask'
-        return pd.concat([bids, asks])
+        res = pd.concat([bids, asks])
+        with BinanceFuturesFetcher._cache_lock:
+            BinanceFuturesFetcher._stats_cache[cache_key] = (now, res)
+        return res
 
     def get_funding_rates(self) -> dict:
         """Get latest funding rates for all symbols"""
@@ -209,13 +339,38 @@ class BinanceFuturesFetcher:
         if not data: return {}
         return {item['symbol']: float(item.get('lastFundingRate', 0)) for item in data}
 
-    def get_books_status(self, symbol: str, impact_usd: float = 1000, imbalance_pct: float = 0.05):
+    def get_24h_changes(self) -> dict:
+        """Get and cache 24h priceChangePercent for all symbols (60s TTL)"""
+        now = time.time()
+        cache_key = ("ticker_24h_chg",)
+        with BinanceFuturesFetcher._cache_lock:
+            if cache_key in BinanceFuturesFetcher._stats_cache:
+                ts, val = BinanceFuturesFetcher._stats_cache[cache_key]
+                if now - ts < 60.0:
+                    return val
+
+        data = self._request(self.TICKER_24H)
+        if not data or not isinstance(data, list):
+            return {}
+        res = {}
+        for item in data:
+            sym = item.get('symbol')
+            if sym:
+                try:
+                    res[sym] = float(item.get('priceChangePercent', 0.0))
+                except (ValueError, TypeError):
+                    pass
+        with BinanceFuturesFetcher._cache_lock:
+            BinanceFuturesFetcher._stats_cache[cache_key] = (now, res)
+        return res
+
+    def get_books_status(self, symbol: str, impact_usd: float = 1000, imbalance_pct: float = 0.05, limit: int = 500):
         """
         Calculate impact spread and orderbook imbalance.
         impact_usd: USD size to calculate average execution price.
         imbalance_pct: range around mid-price to calculate volume imbalance.
         """
-        df = self.get_orderbooks(symbol)
+        df = self.get_orderbooks(symbol, limit=limit)
         if df.empty: return {}
 
         bids = df[df["side"] == "bid"].sort_values("price", ascending=False)
@@ -575,7 +730,7 @@ class BinanceFuturesFetcher:
 class DataManager:
     """Manages data storage and caching"""
     
-    def __init__(self, data_dir: str = "data_cache", cache_size: int = 50):
+    def __init__(self, data_dir: str = "data_cache", cache_size: int = 500):
         self.data_dir = data_dir
         os.makedirs(data_dir, exist_ok=True)
         from collections import OrderedDict

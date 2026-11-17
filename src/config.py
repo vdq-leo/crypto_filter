@@ -94,17 +94,192 @@ METRIC_LABELS = {
     'avg_drawdown': 'Average Drawdown',
     'breakout_score_dist': 'Breakout Score v1',
     'breakout_score_break': 'Breakout Score v2',
-    'orderbook_imbalance': 'OBook Imbalance',
+    'orderbook_imbalance': 'Orderbook Imbalance',
+    'impact_spread': 'Orderbook Impact Spread',
     'spread': 'Spread',
-    'funding_rate': 'Funding Rate',
+    'funding_rate': 'Live Funding Rate',
     'oi_circulating': 'OI / Circulating Supply',
     'top_ls_position_ratio': 'Top Trader L/S (Position)',
     'top_ls_account_ratio': 'Top Trader L/S (Account)',
     'global_ls_ratio': 'Global L/S Account Ratio',
     'taker_buysell_ratio': 'Taker Buy/Sell Volume Ratio',
     'adl_risk': 'ADL Risk Rating',
+    'chg_24h': '24h Chg (%)',
+    'raw_value': 'Raw Value (Latest)',
     'None': 'None'
 }
+
+# Supported Data Sources for Market Radar Axes
+RADAR_SOURCES = {
+    'ohlcv': 'Price (OHLCV)',
+    'oi_usd': 'Open Interest (USD)',
+    'oi_coins': 'Open Interest (Coins)',
+    'top_ls_pos': 'Top Trader L/S (Pos)',
+    'top_ls_acc': 'Top Trader L/S (Acc)',
+    'global_ls': 'Global L/S Ratio',
+    'taker_bs': 'Taker Buy/Sell Ratio',
+    'funding': 'Funding Rate',
+    'snapshot': 'Snapshot / Orderbook',
+}
+
+SNAPSHOT_METRICS = [
+    'chg_24h',
+    'orderbook_imbalance',
+    'impact_spread',
+    'adl_risk',
+    'funding_rate',
+    'oi_circulating',
+]
+
+# Per-metric parameter specifications (single source of truth for UI & backend)
+METRIC_SPECS = {
+    # Snapshot / Direct Microstructure Metrics (no TS source or interval needed)
+    'orderbook_imbalance': {
+        'label': 'Orderbook Imbalance',
+        'category': 'snapshot',
+        'params': [
+            {'name': 'deviation_pct', 'label': 'Mid Deviation (%)', 'default': 2.0, 'min': 0.1, 'max': 50.0, 'step': 0.5},
+        ]
+    },
+    'impact_spread': {
+        'label': 'Orderbook Impact Spread',
+        'category': 'snapshot',
+        'params': [
+            {'name': 'impact_usd', 'label': 'Size ($)', 'default': 1000, 'min': 100, 'max': 1000000, 'step': 500},
+        ]
+    },
+    'adl_risk': {'label': 'ADL Risk Rating', 'category': 'snapshot', 'params': []},
+    'chg_24h': {'label': '24h Chg (%)', 'category': 'snapshot', 'params': []},
+    'funding_rate': {'label': 'Live Funding Rate', 'category': 'snapshot', 'params': []},
+    'oi_circulating': {'label': 'OI / Circulating Supply', 'category': 'snapshot', 'params': []},
+
+    # Time-Series Metrics
+    'raw_value': {'label': 'Raw Value (Latest)', 'category': 'ts', 'params': []},
+    'price_zscore': {
+        'label': 'Z-Score', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 500, 'step': 5}]
+    },
+    'vam': {
+        'label': 'Momentum (VAM)', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 500, 'step': 5}]
+    },
+    'ewva': {
+        'label': 'Trend Strength (EWMA)', 'category': 'ts',
+        'params': [
+            {'name': 'w_short', 'label': 'Fast EMA', 'default': 20, 'min': 2, 'max': 200, 'step': 2},
+            {'name': 'w_slow', 'label': 'Slow EMA', 'default': 120, 'min': 10, 'max': 500, 'step': 5},
+            {'name': 'window', 'label': 'Std Span', 'default': 40, 'min': 5, 'max': 300, 'step': 5},
+        ]
+    },
+    'price_vama': {
+        'label': 'Price / VAMA Ratio', 'category': 'ts',
+        'params': [
+            {'name': 'maMin', 'label': 'Min MA', 'default': 50, 'min': 10, 'max': 200, 'step': 5},
+            {'name': 'period', 'label': 'Vol Period', 'default': 37, 'min': 5, 'max': 200, 'step': 1},
+            {'name': 'volFactor', 'label': 'Vol Factor', 'default': 0.17, 'min': 0.01, 'max': 2.0, 'step': 0.01},
+        ]
+    },
+    'rsi_norm': {
+        'label': 'RSI (Normalized)', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'RSI Period', 'default': 14, 'min': 2, 'max': 200, 'step': 1}]
+    },
+    'aroon_osc': {
+        'label': 'Aroon Oscillator', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Aroon Period', 'default': 25, 'min': 5, 'max': 200, 'step': 1}]
+    },
+    'volatility': {
+        'label': 'Volatility (Realized)', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 500, 'step': 5}]
+    },
+    'atr_norm': {
+        'label': 'Normalized ATR', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'ATR Period', 'default': 14, 'min': 2, 'max': 200, 'step': 1}]
+    },
+    'adf_stat': {
+        'label': 'ADF Stationarity', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Lookback', 'default': 40, 'min': 10, 'max': 300, 'step': 5}]
+    },
+    'mr_prob': {
+        'label': 'Mean Reversion Prob', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 10, 'max': 300, 'step': 5}]
+    },
+    'breakout_score_dist': {
+        'label': 'Breakout Score', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 10, 'max': 300, 'step': 5}]
+    },
+    'skewness': {
+        'label': 'Return Skewness', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 10, 'max': 500, 'step': 5}]
+    },
+    'autocorr_1': {
+        'label': 'Autocorrelation (Lag 1)', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 10, 'max': 500, 'step': 5}]
+    },
+    'fip': {
+        'label': 'FIP (Frog in the Pan)', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 500, 'step': 5}]
+    },
+    'max_drawdown': {
+        'label': 'Max Drawdown', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 500, 'step': 5}]
+    },
+    'calmar_ratio': {
+        'label': 'Calmar Ratio', 'category': 'ts',
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 500, 'step': 5}]
+    },
+    'rel_strength_z': {
+        'label': 'RS Z-Score vs BTC', 'category': 'ts', 'ohlcv_only': True,
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 10, 'max': 300, 'step': 5}]
+    },
+    'beta_btc': {
+        'label': 'BTC Beta', 'category': 'ts', 'ohlcv_only': True,
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 10, 'max': 300, 'step': 5}]
+    },
+    'cmf': {
+        'label': 'Chaikin Money Flow', 'category': 'ts', 'ohlcv_only': True,
+        'params': [{'name': 'window', 'label': 'Window', 'default': 20, 'min': 5, 'max': 200, 'step': 5}]
+    },
+    'vwap_z': {
+        'label': 'VWAP Z-Score', 'category': 'ts', 'ohlcv_only': True,
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 300, 'step': 5}]
+    },
+    'volume_imbalance': {
+        'label': 'Volume Imbalance', 'category': 'ts', 'ohlcv_only': True,
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 300, 'step': 5}]
+    },
+    'liquidity_impact': {
+        'label': 'Liquidity Impact', 'category': 'ts', 'ohlcv_only': True,
+        'params': [{'name': 'window', 'label': 'Window', 'default': 40, 'min': 5, 'max': 300, 'step': 5}]
+    },
+}
+
+# Curated, non-redundant metrics for Market Radar
+RADAR_METRICS = [
+    'raw_value',
+    'chg_24h',
+    'price_zscore',
+    'vam',
+    'ewva',
+    'price_vama',
+    'rsi_norm',
+    'aroon_osc',
+    'volatility',
+    'atr_norm',
+    'adf_stat',
+    'mr_prob',
+    'breakout_score_dist',
+    'skewness',
+    'autocorr_1',
+    'fip',
+    'max_drawdown',
+    'calmar_ratio',
+    'rel_strength_z',
+    'beta_btc',
+    'cmf',
+    'vwap_z',
+    'volume_imbalance',
+    'liquidity_impact',
+]
 
 # List of all available numeric metrics for axes
 ALL_METRICS = [

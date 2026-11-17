@@ -14,42 +14,41 @@ SYNC_INTERVALS = ["15m", "1h", "4h", "1d"]
 
 def _sync_mandatory_batch():
     try:
-        manager = get_manager()
-        symbols = list(MANDATORY_CRYPTO)
-        try:
-            top_syms = manager.get_universe(top_n=50)
-            if top_syms:
-                for s in top_syms:
-                    if s not in symbols:
-                        symbols.append(s)
-        except Exception:
-            pass
+        from src.data import BinanceFuturesFetcher
+        if BinanceFuturesFetcher.is_rate_limited():
+            logger.info("Background sync skipped: Binance rate limit cooldown active.")
+            return
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = []
-            for sym in symbols[:40]:
-                for interval in SYNC_INTERVALS:
-                    futures.append(pool.submit(manager.load_data, sym, interval, auto_sync=True))
-            for f in futures:
+        manager = get_manager()
+        # Keep background sync polite: sync top 10 symbols sequentially with interval spacing
+        symbols = list(MANDATORY_CRYPTO)[:10]
+        for sym in symbols:
+            if BinanceFuturesFetcher.is_rate_limited():
+                break
+            for interval in ["1h", "15m"]:
+                if BinanceFuturesFetcher.is_rate_limited():
+                    break
                 try:
-                    f.result()
-                except Exception:
-                    pass
+                    manager.load_data(sym, interval, auto_sync=True)
+                except Exception as e:
+                    logger.debug(f"Sync error for {sym}_{interval}: {e}")
+                import time
+                time.sleep(0.25)
     except Exception as e:
         logger.error(f"Error in _sync_mandatory_batch: {e}")
 
 async def continuous_data_sync_daemon():
     logger.info("Continuous market data ingestion daemon started.")
-    await asyncio.sleep(5)
+    await asyncio.sleep(10)
     while True:
         try:
             await asyncio.to_thread(_sync_mandatory_batch)
-            logger.info("Continuous data ingestion: Synced mandatory symbols cache.")
+            logger.info("Continuous data ingestion: Synced active symbols cache.")
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.error(f"Error in continuous data ingestion daemon: {e}")
-        await asyncio.sleep(120)
+        await asyncio.sleep(300)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

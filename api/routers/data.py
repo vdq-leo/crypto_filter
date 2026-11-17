@@ -118,8 +118,14 @@ def background_fetch_task(req: FetchRequest):
     global FETCH_IN_PROGRESS
     FETCH_IN_PROGRESS = True
     try:
+        import time
         for sym in req.symbols:
+            if fetcher.is_rate_limited():
+                logger.warning(f"Background fetch aborted: Binance rate limit active.")
+                break
             for inter in req.intervals:
+                if fetcher.is_rate_limited():
+                    break
                 try:
                     first_ts, last_ts = manager.get_cache_range(sym, inter)
                     if req.mode == "Range":
@@ -158,8 +164,9 @@ def background_fetch_task(req: FetchRequest):
                         df = fetcher.fetch_candles(sym, inter, limit=req.limit)
                         if not df.empty:
                             manager.append_data(sym, inter, df)
+                    time.sleep(0.15)
                 except Exception as e:
-                    logger.log("API", "ERROR", f"Error fetching {sym} {inter}: {str(e)}")
+                    logger.error(f"Error fetching {sym} {inter}: {str(e)}")
     finally:
         FETCH_IN_PROGRESS = False
 

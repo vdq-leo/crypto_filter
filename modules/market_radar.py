@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, TRADINGVIEW_URL, ALL_METRICS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
+from src.config import METRIC_LABELS, BENCHMARK_SYMBOL, TRADINGVIEW_URL, ALL_METRICS, RADAR_SOURCES, RADAR_METRICS, SNAPSHOT_METRICS, METRIC_SPECS, AVAILABLE_INTERVALS, MANDATORY_CRYPTO, IGNORED_CRYPTO, API_BASE_URL
 from src.logger import logger
 from scipy import stats
 import requests
@@ -20,7 +20,7 @@ def market_radar_ui():
 
                     ui.input_action_button(
                         "btn_calc_snapshot",
-                        "Load Data",
+                        "Calculate Metrics",
                         class_="btn-primary w-100 mb-2"
                     ),
                     ui.output_ui("radar_universe_badge"),
@@ -32,44 +32,55 @@ def market_radar_ui():
                         multiple=False
                     ),
 
-                    ui.input_select(
-                        "radar_interval",
-                        "Interval",
-                        selected="1h",
-                        choices=AVAILABLE_INTERVALS
-                    ),
-
-                    ui.input_numeric(
-                        "filter_window",
-                        "Window Size",
-                        value=40,
-                        min=5,
-                        max=500,
-                        step=5
-                    ),
-
                     ui.hr(class_="mt-2 mb-2"),
 
-                    # ----- AXES (each own row) -----
-                    ui.input_select(
-                        "x_axis",
-                        "X Axis",
-                        choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected="mr_prob"
+                    # ----- AXES (Source + Interval side-by-side, Metric, Dynamic Params) -----
+                    ui.div(
+                        ui.div("X AXIS", class_="text-uppercase fw-bold small text-info mb-1", style="letter-spacing: 0.8px;"),
+                        ui.layout_columns(
+                            ui.input_select("x_source", "Source", choices=RADAR_SOURCES, selected="ohlcv", width="100%"),
+                            ui.panel_conditional(
+                                "input.x_source != 'snapshot'",
+                                ui.input_select("x_interval", "Int", choices=AVAILABLE_INTERVALS, selected="1h", width="100%")
+                            ),
+                            col_widths=[8, 4]
+                        ),
+                        ui.input_select("x_axis", "Metric", choices={m: METRIC_LABELS.get(m, m) for m in RADAR_METRICS}, selected="price_zscore", width="100%"),
+                        ui.output_ui("x_params_ui"),
+                        class_="p-2 mb-2 rounded border border-secondary bg-dark bg-opacity-25",
+                        style="overflow: hidden;"
                     ),
 
-                    ui.input_select(
-                        "y_axis",
-                        "Y Axis",
-                        choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
-                        selected="breakout_score_dist"
+                    ui.div(
+                        ui.div("Y AXIS", class_="text-uppercase fw-bold small text-info mb-1", style="letter-spacing: 0.8px;"),
+                        ui.layout_columns(
+                            ui.input_select("y_source", "Source", choices=RADAR_SOURCES, selected="ohlcv", width="100%"),
+                            ui.panel_conditional(
+                                "input.y_source != 'snapshot'",
+                                ui.input_select("y_interval", "Int", choices=AVAILABLE_INTERVALS, selected="1h", width="100%")
+                            ),
+                            col_widths=[8, 4]
+                        ),
+                        ui.input_select("y_axis", "Metric", choices={m: METRIC_LABELS.get(m, m) for m in RADAR_METRICS}, selected="vam", width="100%"),
+                        ui.output_ui("y_params_ui"),
+                        class_="p-2 mb-2 rounded border border-secondary bg-dark bg-opacity-25",
+                        style="overflow: hidden;"
                     ),
 
-                    ui.input_select(
-                        "z_axis",
-                        "Z Axis",
-                        choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in ALL_METRICS}},
-                        selected="volume_imbalance"
+                    ui.div(
+                        ui.div("Z AXIS (SIZE & COLOR)", class_="text-uppercase fw-bold small text-info mb-1", style="letter-spacing: 0.8px;"),
+                        ui.layout_columns(
+                            ui.input_select("z_source", "Source", choices=RADAR_SOURCES, selected="ohlcv", width="100%"),
+                            ui.panel_conditional(
+                                "input.z_source != 'snapshot' && input.z_axis != 'None'",
+                                ui.input_select("z_interval", "Int", choices=AVAILABLE_INTERVALS, selected="1h", width="100%")
+                            ),
+                            col_widths=[8, 4]
+                        ),
+                        ui.input_select("z_axis", "Metric", choices={"None": "None", **{m: METRIC_LABELS.get(m, m) for m in RADAR_METRICS}}, selected="volume_imbalance", width="100%"),
+                        ui.output_ui("z_params_ui"),
+                        class_="p-2 mb-2 rounded border border-secondary bg-dark bg-opacity-25",
+                        style="overflow: hidden;"
                     ),
 
                     # ----- NORMALIZE (single row) -----
@@ -92,7 +103,8 @@ def market_radar_ui():
                     ),   
 
                     ui.hr(class_="mt-2 mb-2"),              
-                    ui.p("Assets are managed globally in the ASSET FILTER tab.", class_="text-muted small")
+                    ui.p("Assets are managed globally in the ASSET FILTER tab.", class_="text-muted small"),
+                    width=300
                 ),
                 ui.div(
                     # Hidden markers to ensure reactive outputs are transmitted
@@ -100,7 +112,7 @@ def market_radar_ui():
                     
                     ui.panel_conditional(
                         "input.btn_calc_snapshot == 0",
-                        ui.div(ui.h4("Click 'Load Data' to see data"), class_="text-center mt-5")
+                        ui.div(ui.h4("Click 'Calculate Metrics' to see data"), class_="text-center mt-5")
                     ),
                     ui.panel_conditional(
                         "input.btn_calc_snapshot > 0",
@@ -153,14 +165,14 @@ def market_radar_ui():
                     ui.input_select(
                         "rpg_x",
                         "X Axis",
-                        choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
+                        choices={m: METRIC_LABELS.get(m, m) for m in RADAR_METRICS},
                         selected="rel_strength_z"
                     ),
 
                     ui.input_select(
                         "rpg_y",
                         "Y Axis",
-                        choices={m: METRIC_LABELS.get(m, m) for m in ALL_METRICS},
+                        choices={m: METRIC_LABELS.get(m, m) for m in RADAR_METRICS},
                         selected="breakout_score_dist"
                     ),
 
@@ -229,6 +241,7 @@ def market_radar_ui():
 
 def market_radar_server(input, output, session, global_interval, global_universe):
     snapshot_data = reactive.Value(pd.DataFrame())
+    active_axes_meta = reactive.Value({"x_label": "X", "y_label": "Y", "z_label": "None", "z_active": False})
     rpg_data = reactive.Value(pd.DataFrame())
     selected_symbol_data = reactive.Value(None)
     
@@ -260,10 +273,14 @@ def market_radar_server(input, output, session, global_interval, global_universe
             ui.update_selectize("rpg_focus_symbol", choices=curr_sel, selected=new_rpg_focus)
 
     @reactive.effect
+    @reactive.event(input.focus_symbol, ignore_init=True)
     def _sync_focus_symbol():
         symbol = input.focus_symbol()
         if symbol:
-            selected_symbol_data.set(symbol.upper())
+            sym_upper = symbol.upper()
+            selected_symbol_data.set(sym_upper)
+            if input.btn_calc_snapshot() > 0:
+                ui.update_selectize("quick_symbol", selected=[sym_upper])
 
     @reactive.effect
     def _sync_rpg_focus_symbol():
@@ -271,51 +288,170 @@ def market_radar_server(input, output, session, global_interval, global_universe
         if symbol:
             selected_rpg_focus_data.set(symbol.upper())
 
+    def _get_metric_choices_for_source(source_key, include_none=False):
+        if source_key == "snapshot":
+            choices = {m: METRIC_LABELS.get(m, m) for m in SNAPSHOT_METRICS}
+        elif source_key == "ohlcv":
+            choices = {m: METRIC_LABELS.get(m, m) for m in RADAR_METRICS}
+        else:
+            choices = {
+                m: METRIC_LABELS.get(m, m)
+                for m in RADAR_METRICS
+                if not METRIC_SPECS.get(m, {}).get("ohlcv_only", False)
+            }
+        if include_none:
+            return {"None": "None", **choices}
+        return choices
+
     @reactive.effect
-    @reactive.event(input.btn_calc_snapshot)
-    async def _():
-        logger.log("Market Radar", "INFO", "Snapshot calculation triggered")
+    @reactive.event(input.x_source, ignore_init=True)
+    def _():
+        choices = _get_metric_choices_for_source(input.x_source())
+        with reactive.isolate():
+            curr = input.x_axis()
+        sel = curr if curr in choices else next(iter(choices))
+        ui.update_select("x_axis", choices=choices, selected=sel)
+
+    @reactive.effect
+    @reactive.event(input.y_source, ignore_init=True)
+    def _():
+        choices = _get_metric_choices_for_source(input.y_source())
+        with reactive.isolate():
+            curr = input.y_axis()
+        sel = curr if curr in choices else next(iter(choices))
+        ui.update_select("y_axis", choices=choices, selected=sel)
+
+    @reactive.effect
+    @reactive.event(input.z_source, ignore_init=True)
+    def _():
+        choices = _get_metric_choices_for_source(input.z_source(), include_none=True)
+        with reactive.isolate():
+            curr = input.z_axis()
+        sel = curr if curr in choices else next(iter(choices))
+        ui.update_select("z_axis", choices=choices, selected=sel)
+
+    def _render_axis_params(prefix, metric_key):
+        if not metric_key or metric_key == "None":
+            return ui.div()
+        spec = METRIC_SPECS.get(metric_key, {})
+        params = spec.get("params", [])
+        if not params:
+            return ui.div()
+        inputs = []
+        for p in params:
+            inp_id = f"{prefix}_param_{p['name']}"
+            with reactive.isolate():
+                try:
+                    curr_val = getattr(input, inp_id)()
+                except Exception:
+                    curr_val = None
+            val = curr_val if curr_val is not None else p["default"]
+            inputs.append(
+                ui.input_numeric(
+                    inp_id, p["label"], value=val,
+                    min=p.get("min"), max=p.get("max"), step=p.get("step"),
+                    width="100%"
+                )
+            )
+        if len(inputs) == 1:
+            return inputs[0]
+        rows = []
+        for i in range(0, len(inputs), 2):
+            pair = inputs[i:i+2]
+            if len(pair) == 2:
+                rows.append(ui.layout_columns(*pair, col_widths=[6, 6]))
+            else:
+                rows.append(pair[0])
+        return ui.div(*rows)
+
+    @render.ui
+    def x_params_ui():
+        return _render_axis_params("x", input.x_axis())
+
+    @render.ui
+    def y_params_ui():
+        return _render_axis_params("y", input.y_axis())
+
+    @render.ui
+    def z_params_ui():
+        return _render_axis_params("z", input.z_axis())
+
+    def _collect_axis_config(prefix, source_val, metric_val, interval_val):
+        params = {}
+        spec = METRIC_SPECS.get(metric_val, {})
+        for p in spec.get("params", []):
+            inp_id = f"{prefix}_param_{p['name']}"
+            try:
+                val = getattr(input, inp_id)()
+                params[p["name"]] = val if val is not None else p["default"]
+            except Exception:
+                params[p["name"]] = p["default"]
+        return {
+            "source": source_val,
+            "metric": metric_val,
+            "interval": interval_val if source_val != "snapshot" else "1h",
+            "params": params,
+        }
+
+    async def _run_snapshot_fetch(show_progress=True):
         try:
-            interval = input.radar_interval()
-            logger.log("Market Radar", "INFO", f"Using interval: {interval}")
-            
             with reactive.isolate():
                 syms = list(selected_symbols_radar.get() or global_universe.get() or MANDATORY_CRYPTO)
             symbols = sorted([s for s in syms if s not in IGNORED_CRYPTO])
-            logger.log("Market Radar", "INFO", f"Calculating metrics for {len(symbols)} symbols")
-            
             if not symbols:
                 ui.notification_show("Please select symbols for analysis in Asset Filter.", type="warning")
                 return
 
-            with ui.Progress(min=0, max=100) as p:
-                p.set(message="Analyzing...")
-                
-                payload = {
-                    "symbols": symbols,
-                    "interval": interval,
-                    "filter_window": input.filter_window()
-                }
-                
-                try:
-                    res = requests.post(f"{API_BASE_URL}/market-radar/snapshot", json=payload)
-                    if res.status_code == 200:
-                        results = res.json().get("metrics", [])
-                        if not results:
-                            ui.notification_show("Failed to compute metrics for any symbols.", type="error")
-                            return
-                        res_df = pd.DataFrame(results)
-                        snapshot_data.set(res_df)
-                        ui.notification_show(f"Market Snapshot updated for {len(res_df)} assets!", type="success")
-                    else:
-                        ui.notification_show(f"Calculation error: {res.text}", type="error")
-                except Exception as e:
-                    ui.notification_show(f"API Connection error: {str(e)}", type="error")
+            x_cfg = _collect_axis_config("x", input.x_source(), input.x_axis(), input.x_interval())
+            y_cfg = _collect_axis_config("y", input.y_source(), input.y_axis(), input.y_interval())
+            z_metric = input.z_axis()
+            z_cfg = _collect_axis_config("z", input.z_source(), z_metric, input.z_interval()) if z_metric != "None" else None
+
+            payload = {
+                "symbols": symbols,
+                "x": x_cfg,
+                "y": y_cfg,
+                "z": z_cfg,
+            }
+
+            if show_progress:
+                with ui.Progress(min=0, max=100) as p:
+                    p.set(message="Computing Market Radar...")
+                    res = requests.post(f"{API_BASE_URL}/market-radar/snapshot", json=payload, timeout=120)
+            else:
+                res = requests.post(f"{API_BASE_URL}/market-radar/snapshot", json=payload, timeout=120)
+
+            if res.status_code == 200:
+                resp_json = res.json()
+                results = resp_json.get("metrics", [])
+                if not results:
+                    ui.notification_show("Failed to compute metrics for any symbols.", type="error")
                     return
-                
+                res_df = pd.DataFrame(results)
+                active_axes_meta.set({
+                    "x_label": _axis_label(x_cfg["source"], x_cfg["metric"], x_cfg["interval"]),
+                    "y_label": _axis_label(y_cfg["source"], y_cfg["metric"], y_cfg["interval"]),
+                    "z_label": _axis_label(z_cfg["source"], z_cfg["metric"], z_cfg["interval"]) if z_cfg else "None",
+                    "z_active": z_cfg is not None,
+                })
+                snapshot_data.set(res_df)
+                if resp_json.get("rate_limited"):
+                    cd = resp_json.get("cooldown_sec", 0)
+                    ui.notification_show(f"Binance API rate-limited (cooldown {cd}s). Orderbook/API metrics may show 0 until cooldown ends.", type="warning")
+                elif show_progress:
+                    hits = resp_json.get("cache_hits", 0)
+                    misses = resp_json.get("cache_misses", 0)
+                    ui.notification_show(f"Updated {len(res_df)} assets (cache hits: {hits}, computed: {misses})", type="success")
+            else:
+                ui.notification_show(f"Calculation error: {res.text}", type="error")
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"Snapshot error: {str(e)}")
             ui.notification_show(f"Calculation error: {str(e)}", type="error")
+
+    @reactive.effect
+    @reactive.event(input.btn_calc_snapshot)
+    async def _():
+        await _run_snapshot_fetch(show_progress=True)
 
     @render.ui
     def radar_universe_badge():
@@ -359,70 +495,52 @@ def market_radar_server(input, output, session, global_interval, global_universe
         if df.empty:
             return df
         
-        # Filter by active global symbols
         active_syms = selected_symbols_radar.get()
         if active_syms:
             df = df[df['symbol'].isin(active_syms)]
             
         if input.drop_zeros():
-            df = df[df['volatility'] > 1e-9]
+            x_nonzero = pd.to_numeric(df['x_val'], errors='coerce').abs().fillna(0) > 1e-12
+            y_nonzero = pd.to_numeric(df['y_val'], errors='coerce').abs().fillna(0) > 1e-12
+            df = df[x_nonzero & y_nonzero]
             
-        x = input.x_axis()
-        y = input.y_axis()
-        
         x_norm = input.x_norm()
         y_norm = input.y_norm()
 
-        if x in df.columns:
+        if 'x_val' in df.columns:
             if x_norm == "Rank":
-                df[x] = pd.to_numeric(df[x], errors='coerce').rank(pct=True)
+                df['x_val'] = pd.to_numeric(df['x_val'], errors='coerce').rank(pct=True)
             elif x_norm == "Z-Score":
-                series = pd.to_numeric(df[x], errors='coerce')
+                series = pd.to_numeric(df['x_val'], errors='coerce')
                 std_x = series.std()
-                if std_x and std_x > 1e-9:
-                    df[x] = (series - series.mean()) / std_x
-                else:
-                    df[x] = 0.0
+                df['x_val'] = ((series - series.mean()) / std_x) if (std_x and std_x > 1e-9) else 0.0
 
-        if y in df.columns:
+        if 'y_val' in df.columns:
             if y_norm == "Rank":
-                df[y] = pd.to_numeric(df[y], errors='coerce').rank(pct=True)
+                df['y_val'] = pd.to_numeric(df['y_val'], errors='coerce').rank(pct=True)
             elif y_norm == "Z-Score":
-                series = pd.to_numeric(df[y], errors='coerce')
+                series = pd.to_numeric(df['y_val'], errors='coerce')
                 std_y = series.std()
-                if std_y and std_y > 1e-9:
-                    df[y] = (series - series.mean()) / std_y
-                else:
-                    df[y] = 0.0
+                df['y_val'] = ((series - series.mean()) / std_y) if (std_y and std_y > 1e-9) else 0.0
             
         return df
 
     @reactive.calc
     def snapshot_regression_params():
         plot_df = filtered_snapshot_df()
-        if len(plot_df) <= 1:
-            return None
-            
-        x, y = input.x_axis(), input.y_axis()
-        if x not in plot_df.columns or y not in plot_df.columns:
+        if len(plot_df) <= 1 or 'x_val' not in plot_df.columns or 'y_val' not in plot_df.columns:
             return None
         
         try:
-            # Ensure selected columns are numeric
-            reg_x = pd.to_numeric(plot_df[x], errors='coerce').values
-            reg_y = pd.to_numeric(plot_df[y], errors='coerce').values
-            
-            # Filter out NaNs or Infs
+            reg_x = pd.to_numeric(plot_df['x_val'], errors='coerce').values
+            reg_y = pd.to_numeric(plot_df['y_val'], errors='coerce').values
             mask = np.isfinite(reg_x) & np.isfinite(reg_y)
             reg_x, reg_y = reg_x[mask], reg_y[mask]
             
             if len(reg_x) > 1 and np.ptp(reg_x) > 1e-9:
                 slope, intercept, r_value, p_value, std_err = stats.linregress(reg_x, reg_y)
-                
-                # Generate line points
                 x_range = np.linspace(reg_x.min(), reg_x.max(), 100)
                 y_range = intercept + slope * x_range
-                
                 return {
                     "x_range": x_range,
                     "y_range": y_range,
@@ -435,114 +553,147 @@ def market_radar_server(input, output, session, global_interval, global_universe
             
         return None
 
+    def _axis_label(source_key, metric_key, interval_key=None):
+        m_label = METRIC_LABELS.get(metric_key, metric_key)
+        if source_key == "snapshot":
+            return m_label
+        s_label = RADAR_SOURCES.get(source_key, source_key)
+        int_str = f" [{interval_key}]" if interval_key else ""
+        return f"{s_label}{int_str} · {m_label}"
+
     @render.data_frame
     def snapshot_table():
-        return filtered_snapshot_df()
+        df = filtered_snapshot_df()
+        if df.empty:
+            return df
+        meta = active_axes_meta.get()
+        x_lbl = meta.get("x_label", "X")
+        y_lbl = meta.get("y_label", "Y")
+        cols = ['symbol', 'x_val', 'y_val']
+        rename_map = {
+            'symbol': 'Symbol',
+            'x_val': x_lbl,
+            'y_val': y_lbl,
+        }
+        if meta.get("z_active") and 'z_val' in df.columns:
+            cols.append('z_val')
+            rename_map['z_val'] = meta.get("z_label", "Z")
+        out = df[[c for c in cols if c in df.columns]].copy()
+        for num_col in out.columns:
+            if num_col != 'symbol':
+                out[num_col] = pd.to_numeric(out[num_col], errors='coerce').round(6)
+        return out.rename(columns=rename_map)
 
     @render_widget
     def snapshot_chart():
         plot_df = filtered_snapshot_df().copy()
         if plot_df.empty:
-            # Return empty figure with message if possible, or just empty
             fig = go.Figure()
             fig.add_annotation(text="No data matching filters or symbols not loaded", showarrow=False, font=dict(size=20))
-            fig.update_layout(template="plotly_dark")
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#0b3d91", plot_bgcolor="#0b3d91")
             return fig
 
-        x, y, z = input.x_axis(), input.y_axis(), input.z_axis()
-        
-        # Ensure selected axes exist in plot_df and are clean numeric series
-        for col in [x, y]:
+        meta = active_axes_meta.get()
+        z_metric = "active" if meta.get("z_active") else "None"
+        x_label = meta.get("x_label", "X")
+        y_label = meta.get("y_label", "Y")
+        z_label = meta.get("z_label", "None")
+
+        for col in ['x_val', 'y_val']:
             if col not in plot_df.columns:
                 plot_df[col] = 0.0
             else:
                 plot_df[col] = pd.to_numeric(plot_df[col], errors='coerce').fillna(0.0)
 
-        if z != "None":
-            if z not in plot_df.columns:
-                plot_df[z] = 0.0
-            else:
-                plot_df[z] = pd.to_numeric(plot_df[z], errors='coerce').fillna(0.0)
-            
-            denom = plot_df[z].max() - plot_df[z].min()
+        if z_metric != "None" and 'z_val' in plot_df.columns:
+            plot_df['z_val'] = pd.to_numeric(plot_df['z_val'], errors='coerce').fillna(0.0)
+            denom = plot_df['z_val'].max() - plot_df['z_val'].min()
             if denom > 1e-9:
-                z_norm = (plot_df[z] - plot_df[z].min()) / denom
+                z_norm = (plot_df['z_val'] - plot_df['z_val'].min()) / denom
                 plot_df['z_marker_size'] = (z_norm * 14 + 6).fillna(8.0)
             else:
                 plot_df['z_marker_size'] = 8.0
-            
             plot_df['z_marker_size'] = plot_df['z_marker_size'].replace([np.inf, -np.inf], np.nan).fillna(8.0)
             
             fig = px.scatter(
-                plot_df, x=x, y=y, size='z_marker_size', color=z,
+                plot_df, x='x_val', y='y_val', size='z_marker_size', color='z_val',
                 hover_name='symbol',
-
                 color_continuous_scale='Spectral_r',
                 template="plotly_dark",
-                custom_data=['symbol']  # Add symbol to custom data for click events
+                custom_data=['symbol', 'z_val']
+            )
+            fig.update_coloraxes(
+                colorbar=dict(
+                    title=dict(text=z_label, side="right"),
+                    thickness=14,
+                    len=0.88,
+                    x=1.01
+                )
             )
         else:
             fig = px.scatter(
-                plot_df, x=x, y=y, hover_name='symbol',
-
+                plot_df, x='x_val', y='y_val', hover_name='symbol',
                 template="plotly_dark",
-                custom_data=['symbol']  # Add symbol to custom data for click events
+                custom_data=['symbol']
             )
             fig.update_traces(marker=dict(color='#00F5FF', size=8))
             
         fig.update_layout(
-            margin=dict(l=50, r=50, t=50, b=50),
+            autosize=True,
+            margin=dict(l=70, r=35, t=55, b=65),
             showlegend=True,
             legend=dict(
                 orientation="h",
-                yanchor="top",
-                y=-0.12,
-                xanchor="center",
-                x=0.5
+                yanchor="bottom",
+                y=1.02,
+                xanchor="left",
+                x=0.0,
+                bgcolor="rgba(0,0,0,0)"
             ),
-            xaxis_title=METRIC_LABELS.get(x, x),
-            yaxis_title=METRIC_LABELS.get(y, y),
+            xaxis_title=x_label,
+            yaxis_title=y_label,
             paper_bgcolor="#0b3d91",
             plot_bgcolor="#0b3d91",
-            height=600,
-            # width=1470,
+            height=620,
             font=dict(family="Space Mono", color="white"),
-            clickmode='event+select'  # Enable click events
+            clickmode='event+select'
         )
 
-        fig.update_xaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
-        fig.update_yaxes(gridcolor="rgba(255, 255, 255, 0.3)", zerolinecolor="rgba(255, 255, 255, 0.5)", linecolor="white", tickcolor="white")
+        fig.update_xaxes(
+            title_standoff=12,
+            gridcolor="rgba(255, 255, 255, 0.2)",
+            zerolinecolor="rgba(255, 255, 255, 0.5)",
+            zerolinewidth=1.5,
+            linecolor="white",
+            tickcolor="white"
+        )
+        fig.update_yaxes(
+            title_standoff=12,
+            gridcolor="rgba(255, 255, 255, 0.2)",
+            zerolinecolor="rgba(255, 255, 255, 0.5)",
+            zerolinewidth=1.5,
+            linecolor="white",
+            tickcolor="white"
+        )
                                
         focus_sym = (input.focus_symbol() or "").strip().upper()
         selected_points = None
         unselected_opacity = 0.2
-        selection_size = 10
 
         if focus_sym and focus_sym in plot_df['symbol'].str.upper().values:
             pos_idx = list(plot_df['symbol'].str.upper()).index(focus_sym)
             selected_points = [pos_idx]
-            
-        if z != "None" and 'z_marker_size' in plot_df.columns:
-            size_max = 20
-            min_visible = 8
 
-            mask = plot_df['symbol'].astype(str).str.strip().str.upper() == focus_sym
-
-            if mask.any():
-                max_val = plot_df['z_marker_size'].max()
-                current_val = plot_df.loc[mask, 'z_marker_size'].iloc[0]
-
-                if max_val > 0:
-                    sizeref = 2 * max_val / (size_max ** 2)
-                    pixel_size = np.sqrt(current_val / sizeref)
-
-                    selection_size = pixel_size if pixel_size >= min_visible else min_visible
+        hover_tpl = (
+            '<b>%{hovertext}</b><br>' +
+            f'{x_label}: %{{x:.4f}}<br>' +
+            f'{y_label}: %{{y:.4f}}<br>' +
+            (f'{z_label}: %{{customdata[1]:.4f}}<br>' if z_metric != "None" else '') +
+            '<extra></extra>'
+        )
 
         fig.update_traces(
-            hovertemplate='<b>%{hovertext}</b><br>' +
-                        f'{METRIC_LABELS.get(x, x)}: %{{x}}<br>' +
-                        f'{METRIC_LABELS.get(y, y)}: %{{y}}<br>' +
-                        '<extra></extra>',
+            hovertemplate=hover_tpl,
             selectedpoints=selected_points,
             marker=dict(
                 line=dict(
@@ -551,16 +702,10 @@ def market_radar_server(input, output, session, global_interval, global_universe
                 )
             ),
             selected=dict(
-                marker=dict(
-                    # color='#FF3B3B',
-                    # size=selection_size,
-                    opacity=1
-                )
+                marker=dict(opacity=1)
             ),
             unselected=dict(
-                marker=dict(
-                    opacity=unselected_opacity
-                )
+                marker=dict(opacity=unselected_opacity)
             )
         )
 
@@ -609,10 +754,12 @@ def market_radar_server(input, output, session, global_interval, global_universe
                     return
                 
                 logger.log("Market Radar", "INFO", f"Selected symbol: {symbol}")
-                selected_symbol_data.set(symbol)
+                sym_upper = str(symbol).strip().upper()
+                selected_symbol_data.set(sym_upper)
                 
-                # Update Focus Symbol input box
-                ui.update_selectize("focus_symbol", selected=symbol)
+                # Update Focus Symbol input box & Launch Assets taskbar
+                ui.update_selectize("focus_symbol", selected=sym_upper)
+                ui.update_selectize("quick_symbol", selected=[sym_upper])
         except Exception as e:
             logger.log("Market Radar", "ERROR", f"Error handling chart click: {e}")
 

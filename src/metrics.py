@@ -381,6 +381,9 @@ class MetricsEngine:
         # Core returns calculation
         ret = close.pct_change()
 
+        if should_calc('raw_value'):
+            res['raw_value'] = close
+
         # 1. EWVA: (EMA_fast - EMA_slow) / STD(price)
         if should_calc('ewva') or should_calc('vol_rank') or should_calc('vwap_z'):
             std_p = close.ewm(span=window).std()
@@ -1145,6 +1148,219 @@ class MetricsEngine:
         
         wins = np.sum(log_returns > 0)
         return float(wins / len(log_returns))
+
+    @staticmethod
+    def _calc_24h_chg(s: pd.Series, interval: str = '1h') -> float:
+        """Compute 24h % change (or raw diff for signed series like Funding Rate)."""
+        if s is None or len(s) < 2:
+            return 0.0
+        if isinstance(s.index, pd.DatetimeIndex):
+            target_ts = s.index[-1] - pd.Timedelta(hours=24)
+            past = s[s.index <= target_ts]
+            prev = float(past.iloc[-1]) if not past.empty else float(s.iloc[0])
+        else:
+            bars_24h = {
+                '1m': 1440, '3m': 480, '5m': 288, '15m': 96, '30m': 48,
+                '1h': 24, '2h': 12, '4h': 6, '6h': 4, '8h': 3, '12h': 2, '1d': 1
+            }
+            bars = min(bars_24h.get(interval, 24), len(s) - 1)
+            prev = float(s.iloc[-1 - bars])
+        curr = float(s.iloc[-1])
+        if (s > 0).all() and abs(prev) > 1e-12:
+            return float((curr - prev) / abs(prev) * 100.0)
+        return float(curr - prev)
+
+    @staticmethod
+    def calculate_ohlcv_metric(
+        df: pd.DataFrame,
+        metric: str,
+        params: Optional[dict] = None,
+        interval: str = '1h',
+        benchmark_returns: pd.Series = None,
+        benchmark_prices: pd.Series = None
+    ) -> float:
+        """Compute a single OHLCV metric with its own specific parameters."""
+        if df is None or df.empty:
+            return 0.0
+        params = params or {}
+        w = int(params.get('window', 40))
+
+        try:
+            close = pd.to_numeric(df['close'], errors='coerce').ffill().bfill()
+            if metric == 'raw_value':
+                return float(close.iloc[-1])
+            if metric == 'chg_24h':
+                if 'open_time' in df.columns:
+                    ts_idx = pd.to_datetime(df['open_time'])
+                    s_ts = pd.Series(close.values, index=ts_idx)
+                    return MetricsEngine._calc_24h_chg(s_ts, interval=interval)
+                return MetricsEngine._calc_24h_chg(close, interval=interval)
+
+            if metric == 'ewva':
+                w_short = max(2, int(params.get('w_short', max(2, int(w * 0.5)))))
+                w_slow = max(5, int(params.get('w_slow', max(5, int(w * 3)))))
+                sub = close.tail(max(w_slow * 3, 200))
+                std_p = sub.ewm(span=w).std().iloc[-1]
+                if not std_p or std_p <= 1e-12 or pd.isna(std_p):
+                    return 0.0
+                ema_f = MetricsEngine.ema(sub, w_short).iloc[-1]
+                ema_s = MetricsEngine.ema(sub, w_slow).iloc[-1]
+                return float((ema_f - ema_s) / std_p)
+
+            if metric == 'price_vama':
+                maMin = int(params.get('maMin', 50))
+                period = int(params.get('period', 37))
+                volFactor = float(params.get('volFactor', 0.17))
+                sub = close.tail(1500)
+                vama_res = MetricsEngine.calculate_vama(sub, maMin=maMin, period=period, volFactor=volFactor)
+                val = vama_res['vama'].iloc[-1]
+                return float(val) if pd.notna(val) and not np.isinf(val) else 0.0
+
+            # Standard single-window or composite OHLCV indicators
+            tail_rows = max(w * 5, 600) if metric in ('mr_prob', 'rel_strength_z', 'beta_btc') else max(w * 4, 300)
+            df_sub = df.tail(tail_rows)
+            ind_df = MetricsEngine.calculate_all_indicators(
+                df_sub,
+                window=w,
+                benchmark_returns=benchmark_returns,
+                benchmark_prices=benchmark_prices,
+                interval=interval,
+                include_metrics=[metric],
+                tail_only=True
+            )
+            if not ind_df.empty and metric in ind_df.columns:
+                val = ind_df[metric].iloc[-1]
+                return float(val) if pd.notna(val) and not np.isinf(val) else 0.0
+        except Exception:
+            return 0.0
+        return 0.0
+
+    @staticmethod
+    def calculate_series_metric(series: pd.Series, metric: str, window: int = 40, interval: str = '1h', params: Optional[dict] = None) -> float:
+        """
+        Compute a quantitative metric on any 1D time series (e.g., Open Interest,
+        Top Trader L/S Ratio, Global L/S Ratio, Taker Ratio, Funding Rate).
+        Handles both strictly-positive series and signed series (like Funding Rate).
+        """
+        if series is None or series.empty:
+            return 0.0
+        s = pd.to_numeric(series, errors='coerce').dropna()
+        if s.empty:
+            return 0.0
+
+        if metric == 'raw_value':
+            return float(s.iloc[-1])
+        if metric == 'chg_24h':
+            return MetricsEngine._calc_24h_chg(s, interval=interval)
+
+        params = params or {}
+        req_w = int(params.get('window', window))
+        w = min(max(req_w, 5), len(s))
+        if len(s) < 3:
+            return 0.0
+
+        is_positive = bool((s > 0).all())
+        changes = s.pct_change().replace([np.inf, -np.inf], np.nan).dropna() if is_positive else s.diff().dropna()
+
+        try:
+            if metric == 'price_zscore':
+                roll_mean = s.rolling(w).mean().iloc[-1]
+                roll_std = s.rolling(w).std().iloc[-1]
+                return float((s.iloc[-1] - roll_mean) / roll_std) if (roll_std and roll_std > 1e-12) else 0.0
+
+            elif metric == 'ewva':
+                w_short = max(2, int(params.get('w_short', max(2, int(w * 0.5)))))
+                w_slow = max(5, int(params.get('w_slow', max(5, int(w * 3)))))
+                ema_f = MetricsEngine.ema(s, w_short).iloc[-1]
+                ema_s = MetricsEngine.ema(s, w_slow).iloc[-1]
+                std_p = s.ewm(span=w).std().iloc[-1]
+                return float((ema_f - ema_s) / std_p) if (std_p and std_p > 1e-12) else 0.0
+
+            elif metric == 'price_vama' and is_positive:
+                maMin = int(params.get('maMin', 50))
+                period = int(params.get('period', 37))
+                volFactor = float(params.get('volFactor', 0.17))
+                vama_res = MetricsEngine.calculate_vama(s, maMin=maMin, period=period, volFactor=volFactor)
+                val = vama_res['vama'].iloc[-1]
+                return float(val) if pd.notna(val) and not np.isinf(val) else 0.0
+
+            elif metric == 'rsi_norm':
+                val = (MetricsEngine.rsi(s, w).iloc[-1] - 50.0) / 100.0
+                return float(val) if pd.notna(val) else 0.0
+
+            elif metric == 'volatility':
+                if changes.empty:
+                    return 0.0
+                ann = MetricsEngine.get_annual_scaling(interval)
+                val = changes.tail(w).std() * np.sqrt(ann)
+                return float(val) if pd.notna(val) else 0.0
+
+            elif metric == 'vam':
+                if changes.empty:
+                    return 0.0
+                vol = changes.rolling(w).std().iloc[-1]
+                if not vol or vol <= 1e-12 or pd.isna(vol):
+                    return 0.0
+                start_val = s.iloc[-w]
+                if is_positive and abs(start_val) > 1e-12:
+                    mom = (s.iloc[-1] - start_val) / abs(start_val)
+                else:
+                    mom = s.iloc[-1] - start_val
+                return float(mom / (vol * np.sqrt(w)))
+
+            elif metric == 'skewness':
+                if len(changes) < 3:
+                    return 0.0
+                val = changes.tail(w).skew()
+                return float(val) if pd.notna(val) else 0.0
+
+            elif metric == 'autocorr_1':
+                if len(changes) < 4:
+                    return 0.0
+                val = changes.tail(w).autocorr(lag=1)
+                return float(val) if pd.notna(val) else 0.0
+
+            elif metric == 'fip':
+                if changes.empty:
+                    return 0.0
+                return float(MetricsEngine.calculate_fip(changes.tail(w).values))
+
+            elif metric == 'adf_stat':
+                stat, _ = MetricsEngine.calculate_custom_adf(s.values, lookback=w)
+                return float(stat) if pd.notna(stat) else 0.0
+
+            elif metric == 'max_drawdown':
+                if not is_positive:
+                    return 0.0
+                return float(MetricsEngine.calculate_max_drawdown(s.tail(w).values))
+
+            elif metric == 'calmar_ratio':
+                if not is_positive or len(changes) < 2:
+                    return 0.0
+                mdd = abs(MetricsEngine.calculate_max_drawdown(s.tail(w).values))
+                if mdd < 1e-9:
+                    return 0.0
+                ann_ret = changes.tail(w).mean() * MetricsEngine.get_annual_scaling(interval)
+                return float(ann_ret / mdd)
+
+            # Fallback for composite / OHLCV-style indicators using synthetic HLC
+            synth_df = pd.DataFrame({
+                'open': s.shift(1).fillna(s),
+                'high': s.rolling(2, min_periods=1).max(),
+                'low': s.rolling(2, min_periods=1).min(),
+                'close': s,
+                'volume': np.ones(len(s), dtype=float)
+            }, index=s.index)
+            ind_df = MetricsEngine.calculate_all_indicators(
+                synth_df, window=w, interval=interval, include_metrics=[metric], tail_only=True
+            )
+            if not ind_df.empty and metric in ind_df.columns:
+                val = ind_df[metric].iloc[-1]
+                return float(val) if pd.notna(val) and not np.isinf(val) else 0.0
+        except Exception:
+            return 0.0
+
+        return 0.0
 
     @staticmethod
     def calculate_rolling_metric(df: pd.DataFrame, metric_name: str, window: int = 30, step: int = 1, benchmark_returns: pd.Series = None, benchmark_prices: pd.Series = None, interval: str = '1h') -> pd.Series:

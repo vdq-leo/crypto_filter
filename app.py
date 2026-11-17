@@ -145,6 +145,29 @@ app_ui = ui.page_navbar(
                     }
                 }
             });
+
+            // Forward Plotly click events on Market Radar chart to Shiny input
+            function bindRadarChartClick() {
+                const container = document.getElementById('snapshot_chart');
+                if (!container) return;
+                const plotEl = container.querySelector('.js-plotly-plot') || container;
+                if (plotEl && typeof plotEl.on === 'function' && !plotEl._radarClickBound) {
+                    plotEl._radarClickBound = true;
+                    plotEl.on('plotly_click', function(data) {
+                        if (data && data.points && data.points.length > 0) {
+                            const pt = data.points[0];
+                            const sym = (pt.customdata && pt.customdata[0]) || pt.hovertext;
+                            if (sym && window.Shiny) {
+                                Shiny.setInputValue('snapshot_chart_click', {
+                                    points: [{ customdata: [sym], hovertext: sym }]
+                                }, { priority: 'event' });
+                            }
+                        }
+                    });
+                }
+            }
+            const radarPlotObserver = new MutationObserver(bindRadarChartClick);
+            radarPlotObserver.observe(document.body, { childList: true, subtree: true });
         """)
     ),
 
