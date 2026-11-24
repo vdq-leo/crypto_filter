@@ -143,3 +143,57 @@ class SeriesDiskCache:
             df.to_parquet(path, index=False)
         except Exception:
             pass
+
+
+class UIStateStore:
+    """
+    Persistent memory + disk store for UI session state (selected assets,
+    Market Radar snapshot, Short Scanner scoreboard) so sleep / WebSocket
+    reconnects restore the exact previous view without recalculating.
+    """
+
+    def __init__(self, base_dir: str = "data_cache/ui_state"):
+        self.base_dir = base_dir
+        os.makedirs(self.base_dir, exist_ok=True)
+        self._mem = {}
+        self._lock = threading.Lock()
+
+    def _path(self, key: str) -> str:
+        return os.path.join(self.base_dir, f"{key}.json")
+
+    def save(self, key: str, data: dict) -> None:
+        import json
+        with self._lock:
+            self._mem[key] = data
+        try:
+            with open(self._path(key), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def load(self, key: str) -> Optional[dict]:
+        import json
+        with self._lock:
+            if key in self._mem:
+                return self._mem[key]
+        path = self._path(key)
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                with self._lock:
+                    self._mem[key] = data
+                return data
+            except Exception:
+                pass
+        return None
+
+
+_ui_state_store = None
+
+
+def get_ui_state() -> UIStateStore:
+    global _ui_state_store
+    if _ui_state_store is None:
+        _ui_state_store = UIStateStore()
+    return _ui_state_store

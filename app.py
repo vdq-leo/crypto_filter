@@ -146,21 +146,34 @@ app_ui = ui.page_navbar(
                 }
             });
 
-            // Forward Plotly click events on Market Radar chart to Shiny input
+            // Forward Plotly click events on Market Radar chart to Shiny & Launch Assets
             function bindRadarChartClick() {
                 const container = document.getElementById('snapshot_chart');
                 if (!container) return;
                 const plotEl = container.querySelector('.js-plotly-plot') || container;
-                if (plotEl && typeof plotEl.on === 'function' && !plotEl._radarClickBound) {
-                    plotEl._radarClickBound = true;
+                if (!plotEl || typeof plotEl.on !== 'function') return;
+
+                const hasListener = (plotEl._events && plotEl._events.plotly_click) ||
+                                    (plotEl._ev && plotEl._ev.plotly_click);
+                if (!hasListener) {
                     plotEl.on('plotly_click', function(data) {
                         if (data && data.points && data.points.length > 0) {
                             const pt = data.points[0];
                             const sym = (pt.customdata && pt.customdata[0]) || pt.hovertext;
-                            if (sym && window.Shiny) {
-                                Shiny.setInputValue('snapshot_chart_click', {
-                                    points: [{ customdata: [sym], hovertext: sym }]
-                                }, { priority: 'event' });
+                            if (sym) {
+                                const qEl = $('#quick_symbol');
+                                if (qEl.length && qEl[0].selectize) {
+                                    const sz = qEl[0].selectize;
+                                    if (!sz.options[sym]) {
+                                        sz.addOption({value: sym, text: sym});
+                                    }
+                                    sz.setValue([sym], true);
+                                }
+                                if (window.Shiny) {
+                                    Shiny.setInputValue('snapshot_chart_click', {
+                                        points: [{ customdata: [sym], hovertext: sym }]
+                                    }, { priority: 'event' });
+                                }
                             }
                         }
                     });
@@ -168,6 +181,7 @@ app_ui = ui.page_navbar(
             }
             const radarPlotObserver = new MutationObserver(bindRadarChartClick);
             radarPlotObserver.observe(document.body, { childList: true, subtree: true });
+            setInterval(bindRadarChartClick, 800);
         """)
     ),
 
@@ -260,9 +274,13 @@ app_ui = ui.page_navbar(
 
 
 def server(input, output, session):
-    # Shared global state if needed
+    # Shared global state if needed (synchronously restored from UIStateStore)
+    from src.cache_store import get_ui_state
+    _saved_af = get_ui_state().load("asset_filter") or {}
+    _init_universe = list(_saved_af.get("selected_symbols") or [])
+
     global_interval = reactive.Value("1h")
-    global_universe = reactive.Value([])
+    global_universe = reactive.Value(_init_universe)
     
     diag_data = reactive.Value({})
     data_info = reactive.Value({"global": {"oldest": "-", "latest": "-"}})

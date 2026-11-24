@@ -195,6 +195,20 @@ def asset_filter_server(*args, **kwargs):
     filtered_df = reactive.Value(pd.DataFrame())
     status_msg = reactive.Value("")
 
+    from src.cache_store import get_ui_state
+    ui_state = get_ui_state()
+
+    def _save_asset_state(selected_syms, table_df):
+        try:
+            all_syms = table_df["Symbol"].tolist() if (table_df is not None and not table_df.empty and "Symbol" in table_df.columns) else selected_syms
+            ui_state.save("asset_filter", {
+                "selected_symbols": list(selected_syms),
+                "all_rows_symbols": all_syms,
+                "table_rows": table_df.to_dict("records") if (table_df is not None and not table_df.empty) else []
+            })
+        except Exception:
+            pass
+
     has_fetched_meta = False
 
     @reactive.effect
@@ -203,6 +217,24 @@ def asset_filter_server(*args, **kwargs):
         if has_fetched_meta:
             return
         has_fetched_meta = True
+
+        # 1. Restore saved asset selection immediately so sleep/reconnect never wipes user's assets
+        saved = ui_state.load("asset_filter")
+        restored = False
+        if saved and saved.get("selected_symbols") is not None:
+            try:
+                sel_syms = list(saved["selected_symbols"])
+                all_syms = list(saved.get("all_rows_symbols", sel_syms))
+                rows = saved.get("table_rows", [])
+                if rows:
+                    filtered_df.set(pd.DataFrame(rows))
+                global_universe.set(sel_syms)
+                ui.update_selectize("asset_filter_selected_symbols", choices=all_syms, selected=sel_syms, session=session)
+                status_msg.set(f"✓ Restored {len(sel_syms)} cached symbols.")
+                restored = True
+            except Exception:
+                pass
+
         try:
             res = await asyncio.to_thread(requests.get, f"{API_BASE_URL}/data/universe/meta", timeout=10)
             if res.status_code == 200:
@@ -214,10 +246,11 @@ def asset_filter_server(*args, **kwargs):
                 meta_store.set(data.get("symbol_meta", {}))
                 ui.update_selectize("asset_filter_types", choices=t_list, session=session)
                 ui.update_selectize("asset_filter_subtypes", choices=st_list, session=session)
-                with reactive.isolate():
-                    is_empty = filtered_df.get().empty
-                if is_empty:
-                    await do_fetch()
+                if not restored:
+                    with reactive.isolate():
+                        is_empty = filtered_df.get().empty
+                    if is_empty:
+                        await do_fetch()
         except Exception as e:
             logger.error(f"Failed to fetch universe meta: {e}")
 
@@ -347,6 +380,7 @@ def asset_filter_server(*args, **kwargs):
                     global_universe.set(syms)
 
                 status_msg.set(f"✓ {len(syms)} symbols loaded.")
+                _save_asset_state(syms, df)
                 
                 # Update selectize with new choices and select all
                 try:
@@ -380,6 +414,7 @@ def asset_filter_server(*args, **kwargs):
             if set(all_syms) != set(current):
                 global_universe.set(all_syms)
                 ui.update_selectize("asset_filter_selected_symbols", selected=all_syms, session=session)
+                _save_asset_state(all_syms, df)
 
     @reactive.effect
     @reactive.event(input.asset_table_deselect_all)
@@ -389,6 +424,7 @@ def asset_filter_server(*args, **kwargs):
         if current:
             global_universe.set([])
             ui.update_selectize("asset_filter_selected_symbols", selected=[], session=session)
+            _save_asset_state([], filtered_df.get())
 
     # Sync Select Box (selectize) changes to global_universe
     @reactive.effect
@@ -399,3 +435,4 @@ def asset_filter_server(*args, **kwargs):
             current = global_universe.get() or []
         if set(selected) != set(current):
             global_universe.set(selected)
+            _save_asset_state(selected, filtered_df.get())

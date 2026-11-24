@@ -358,3 +358,225 @@ def get_path_analysis(req: PathRequest):
     except Exception as e:
         logger.error(f"RPG error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class OvervaluedScanRequest(BaseModel):
+    symbols: Optional[List[str]] = None
+    interval: str = "1h"
+    win_price: int = 24
+    win_oi: int = 24
+    win_top_ls: int = 24
+    win_funding: int = 24
+    deviation_pct: float = 2.0
+    w_price: float = 20.0
+    w_oi: float = 20.0
+    w_top_ls: float = 20.0
+    w_ob: float = 20.0
+    w_funding: float = 20.0
+
+
+@router.post("/overvalued-scan")
+def run_overvalued_scan(req: OvervaluedScanRequest):
+    """
+    5-Pillar Overvalued Shitcoin Scoring Framework on Asset Filter selection:
+      1. Price Inflation (Price Z-Score + VAM, win_price)
+      2. OI Expansion (OI USD Z-Score + VAM, win_oi)
+      3. Top Trader Short Shift (inverted Top L/S Pos Z-Score + VAM, win_top_ls)
+      4. Funding Short Pressure (negative or falling funding, win_funding)
+      5. Orderbook Ask-Bias Trigger (-ob_imbalance on top candidates)
+    """
+    try:
+        non_perp = {"QQQUSDT", "SPYUSDT", "XAUUSDT", "XAGUSDT"}
+
+        vol_map = {}
+        try:
+            for item in fetcher.get_top_volume_symbols_with_meta(top_n=500):
+                vol_map[item["symbol"]] = float(item.get("volume", 0.0))
+        except Exception:
+            pass
+
+        raw_syms = req.symbols if req.symbols else manager.get_universe(top_n=50)
+        symbols = [s for s in raw_syms if s not in non_perp]
+
+        if not symbols:
+            return {"candidates": [], "rate_limited": fetcher.is_rate_limited()}
+
+        chg_24h_map = fetcher.get_24h_changes()
+        live_funding_map = fetcher.get_funding_rates()
+        max_win = max(req.win_price, req.win_oi, req.win_top_ls, req.win_funding, 24)
+        series_limit = min(max(max_win * 4, 150), 500)
+
+        # Pre-fetch OI, Top L/S Pos & Funding series in parallel (disk+mem cached)
+        oi_cache: Dict[str, pd.Series] = {}
+        top_cache: Dict[str, pd.Series] = {}
+        fund_cache: Dict[str, pd.Series] = {}
+
+        def fetch_stats_pair(sym):
+            s_oi = fetcher.get_source_series(sym, "oi_usd", interval=req.interval, limit=series_limit)
+            s_top = fetcher.get_source_series(sym, "top_ls_pos", interval=req.interval, limit=series_limit)
+            s_fund = fetcher.get_source_series(sym, "funding", interval=req.interval, limit=min(series_limit, 100))
+            return sym, s_oi, s_top, s_fund
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            for sym, s_oi, s_top, s_fund in executor.map(fetch_stats_pair, symbols):
+                oi_cache[sym] = s_oi
+                top_cache[sym] = s_top
+                fund_cache[sym] = s_fund
+
+        stale_thresholds = {
+            '1m': timedelta(minutes=5), '3m': timedelta(minutes=10), '5m': timedelta(minutes=15),
+            '15m': timedelta(minutes=45), '30m': timedelta(hours=1), '1h': timedelta(hours=2),
+            '2h': timedelta(hours=4), '4h': timedelta(hours=8), '6h': timedelta(hours=12),
+            '8h': timedelta(hours=16), '12h': timedelta(hours=24), '1d': timedelta(days=2),
+        }
+        max_age = stale_thresholds.get(req.interval, timedelta(hours=2))
+        now_dt = datetime.now()
+        p_price = {"window": req.win_price}
+        p_oi = {"window": req.win_oi}
+        p_top = {"window": req.win_top_ls}
+        p_fund = {"window": req.win_funding}
+
+        def clip_score(val: float, scale: float) -> float:
+            if not np.isfinite(val) or scale <= 0:
+                return 0.0
+            return float(np.clip(val / scale, 0.0, 1.0) * 100.0)
+
+        # Stage 2-4: Compute Price Inflation, OI Expansion, Top Trader Short Shift
+        pre_candidates = []
+        def score_pre(sym):
+            try:
+                df = manager.load_data(sym, req.interval, auto_sync=False)
+                is_stale = False
+                if df is None or df.empty or len(df) < req.win_price:
+                    is_stale = True
+                else:
+                    try:
+                        last_c = pd.to_datetime(df['open_time'].iloc[-1]).tz_localize(None)
+                        if now_dt - last_c > max_age:
+                            is_stale = True
+                    except Exception:
+                        is_stale = True
+                if is_stale:
+                    df = manager.load_data(sym, req.interval, auto_sync=True)
+                if df is None or df.empty:
+                    return None
+
+                p_z = engine.calculate_ohlcv_metric(df, "price_zscore", params=p_price, interval=req.interval)
+                p_vam = engine.calculate_ohlcv_metric(df, "vam", params=p_price, interval=req.interval)
+                s_price = clip_score(0.6 * p_z + 0.4 * p_vam, 3.0)
+
+                s_oi_series = oi_cache.get(sym, pd.Series(dtype=float))
+                oi_z = engine.calculate_series_metric(s_oi_series, "price_zscore", interval=req.interval, params=p_oi)
+                oi_vam = engine.calculate_series_metric(s_oi_series, "vam", interval=req.interval, params=p_oi)
+                s_oi = clip_score(0.6 * oi_z + 0.4 * oi_vam, 3.0)
+
+                s_top_series = top_cache.get(sym, pd.Series(dtype=float))
+                top_z = engine.calculate_series_metric(s_top_series, "price_zscore", interval=req.interval, params=p_top)
+                top_vam = engine.calculate_series_metric(s_top_series, "vam", interval=req.interval, params=p_top)
+                # Negative Z / VAM = Top traders shifting toward SHORT side
+                s_top = clip_score(-(0.6 * top_z + 0.4 * top_vam), 2.5)
+
+                # Funding Short Pressure: negative live funding OR decreasing funding over time
+                live_fund = float(live_funding_map.get(sym, 0.0))
+                s_fund_series = fund_cache.get(sym, pd.Series(dtype=float))
+                fund_z = engine.calculate_series_metric(s_fund_series, "price_zscore", interval=req.interval, params=p_fund)
+                fund_level_score = clip_score(-live_fund, 0.001)   # -0.10% funding => 100
+                fund_trend_score = clip_score(-fund_z, 2.5)        # decreasing funding => 100
+                s_funding = 0.5 * fund_level_score + 0.5 * fund_trend_score
+
+                pre_w = max(req.w_price + req.w_oi + req.w_top_ls + req.w_funding, 1e-6)
+                pre_score = (
+                    req.w_price * s_price
+                    + req.w_oi * s_oi
+                    + req.w_top_ls * s_top
+                    + req.w_funding * s_funding
+                ) / pre_w
+
+                return {
+                    "symbol": sym,
+                    "vol_24h_m": round(vol_map.get(sym, 0.0) / 1e6, 2),
+                    "chg_24h": round(float(chg_24h_map.get(sym, 0.0)), 2),
+                    "price_z": round(float(p_z), 3),
+                    "oi_z": round(float(oi_z), 3),
+                    "top_ls_z": round(float(top_z), 3),
+                    "funding_pct": round(live_fund * 100.0, 4),
+                    "funding_z": round(float(fund_z), 3),
+                    "score_price": round(s_price, 1),
+                    "score_oi": round(s_oi, 1),
+                    "score_top_short": round(s_top, 1),
+                    "score_funding": round(s_funding, 1),
+                    "pre_score": pre_score,
+                }
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for res in executor.map(score_pre, symbols):
+                if res is not None:
+                    pre_candidates.append(res)
+
+        pre_candidates.sort(key=lambda x: x["pre_score"], reverse=True)
+
+        # Stage 5: Fetch Orderbook Imbalance ONLY for top 40 pre-scored candidates to avoid 429 bans
+        ob_targets = [c["symbol"] for c in pre_candidates[:40]]
+        ob_map: Dict[str, float] = {}
+        dev_frac = float(req.deviation_pct) / 100.0
+
+        def fetch_ob(sym):
+            try:
+                res = fetcher.get_books_status(sym, imbalance_pct=dev_frac, limit=100)
+                return sym, res.get("orderbook_imbalance")
+            except Exception:
+                return sym, None
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for sym, imb in executor.map(fetch_ob, ob_targets):
+                if imb is not None and np.isfinite(imb):
+                    ob_map[sym] = float(imb)
+
+        total_w = max(req.w_price + req.w_oi + req.w_top_ls + req.w_ob + req.w_funding, 1e-6)
+        final_rows = []
+        for c in pre_candidates:
+            sym = c["symbol"]
+            imb = ob_map.get(sym, 0.0)
+            ask_bias = -imb  # negative imbalance = ask-side liquidity dominates
+            s_ob = clip_score(ask_bias, 0.40) if sym in ob_map else 0.0
+
+            total_score = (
+                req.w_price * c["score_price"]
+                + req.w_oi * c["score_oi"]
+                + req.w_top_ls * c["score_top_short"]
+                + req.w_ob * s_ob
+                + req.w_funding * c["score_funding"]
+            ) / total_w
+
+            funding_ok = (c["score_funding"] >= 15.0) if req.w_funding > 0 else True
+            if c["score_price"] >= 40 and c["score_oi"] >= 30 and c["score_top_short"] >= 30 and ask_bias >= 0.05 and funding_ok:
+                signal = "TRIGGERED"
+            elif c["score_price"] >= 40 and c["score_oi"] >= 30 and c["score_top_short"] >= 30:
+                signal = "SETUP"
+            elif total_score >= 45:
+                signal = "WATCH"
+            else:
+                signal = "NEUTRAL"
+
+            c["ob_imbalance"] = round(imb, 4) if sym in ob_map else None
+            c["score_ob_ask"] = round(s_ob, 1)
+            c["total_score"] = round(total_score, 1)
+            c["signal"] = signal
+            c.pop("pre_score", None)
+            final_rows.append(c)
+
+        final_rows.sort(key=lambda x: x["total_score"], reverse=True)
+
+        import time
+        rate_limited = fetcher.is_rate_limited()
+        cooldown_sec = max(0, int(fetcher._rate_limited_until - time.time())) if rate_limited else 0
+        return {
+            "candidates": final_rows,
+            "rate_limited": rate_limited,
+            "cooldown_sec": cooldown_sec,
+        }
+    except Exception as e:
+        logger.error(f"Overvalued scan error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

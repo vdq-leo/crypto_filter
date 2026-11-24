@@ -111,14 +111,15 @@ def market_radar_ui():
                     ui.div(ui.output_text("snapshot_ready"), class_="d-none"),
                     
                     ui.panel_conditional(
-                        "input.btn_calc_snapshot == 0",
+                        "output.snapshot_ready != 'true'",
                         ui.div(ui.h4("Click 'Calculate Metrics' to see data"), class_="text-center mt-5")
                     ),
                     ui.panel_conditional(
-                        "input.btn_calc_snapshot > 0",
+                        "output.snapshot_ready == 'true'",
                         ui.div(
                             ui.card(
                                 ui.card_header("Market Radar Snapshot"),
+                                ui.output_ui("range_sliders_ui"),
                                 output_widget("snapshot_chart"),
                                 full_screen=True
                             ),
@@ -236,18 +237,104 @@ def market_radar_ui():
             ),
             value="tab_rpg"
         ),
+        ui.nav_panel("Short Scanner",
+            ui.layout_sidebar(
+                ui.sidebar(
+                    ui.h5("Overvalued Short Hunter"),
+                    ui.input_action_button(
+                        "btn_run_scanner",
+                        "Run Short Scanner",
+                        class_="btn-primary w-100 mb-2"
+                    ),
+                    ui.output_ui("scan_universe_badge"),
+                    ui.layout_columns(
+                        ui.input_select("scan_interval", "Interval", choices=["15m", "1h", "4h"], selected="1h", width="100%"),
+                        ui.input_numeric("scan_ob_dev", "OB Dev %", value=2.0, min=0.5, max=25.0, step=0.5, width="100%"),
+                        col_widths=[6, 6]
+                    ),
+                    ui.hr(class_="mt-2 mb-2"),
+                    ui.div("PILLAR WINDOWS & WEIGHTS", class_="text-uppercase fw-bold small text-info mb-1", style="letter-spacing: 0.8px;"),
+                    ui.layout_columns(
+                        ui.input_numeric("scan_win_price", "Price Win", value=24, min=6, max=200, step=4, width="100%"),
+                        ui.input_numeric("scan_w_price", "Price Wt", value=20, min=0, max=100, step=5, width="100%"),
+                        col_widths=[6, 6]
+                    ),
+                    ui.layout_columns(
+                        ui.input_numeric("scan_win_oi", "OI Win", value=24, min=6, max=200, step=4, width="100%"),
+                        ui.input_numeric("scan_w_oi", "OI Wt", value=20, min=0, max=100, step=5, width="100%"),
+                        col_widths=[6, 6]
+                    ),
+                    ui.layout_columns(
+                        ui.input_numeric("scan_win_top", "Top L/S Win", value=24, min=6, max=200, step=4, width="100%"),
+                        ui.input_numeric("scan_w_top", "Top Short Wt", value=20, min=0, max=100, step=5, width="100%"),
+                        col_widths=[6, 6]
+                    ),
+                    ui.layout_columns(
+                        ui.input_numeric("scan_win_funding", "Fund Win", value=24, min=6, max=200, step=4, width="100%"),
+                        ui.input_numeric("scan_w_funding", "Fund Wt", value=20, min=0, max=100, step=5, width="100%"),
+                        col_widths=[6, 6]
+                    ),
+                    ui.input_numeric("scan_w_ob", "OB Ask Bias Wt", value=20, min=0, max=100, step=5, width="100%"),
+                    ui.hr(class_="mt-2 mb-2"),
+                    ui.input_select(
+                        "scan_signal_filter",
+                        "Signal Filter",
+                        choices=["ALL", "TRIGGERED", "SETUP", "WATCH"],
+                        selected="ALL",
+                        width="100%"
+                    ),
+                    width=300
+                ),
+                ui.div(
+                    ui.div(ui.output_text("scanner_ready"), class_="d-none"),
+                    ui.panel_conditional(
+                        "output.scanner_ready != 'true'",
+                        ui.div(
+                            ui.h4("Click 'Run Short Scanner' to rank overvalued perp candidates"),
+                            ui.p("Scores coins across 5 pillars: Price Inflation, OI Expansion, Top Trader Short Shift, Funding Short Pressure, and Orderbook Ask Bias.", class_="text-muted"),
+                            class_="text-center mt-5"
+                        )
+                    ),
+                    ui.panel_conditional(
+                        "output.scanner_ready == 'true'",
+                        ui.div(
+                            ui.output_ui("scan_summary_ui"),
+                            ui.card(
+                                ui.card_header("Top 20 Overvalued Candidates (Stacked Pillar Score 0–100)"),
+                                output_widget("scan_chart"),
+                                full_screen=True
+                            ),
+                            ui.card(
+                                ui.card_header("Ranked Short Scoreboard"),
+                                ui.output_data_frame("scan_table")
+                            )
+                        )
+                    )
+                )
+            ),
+            value="tab_scanner"
+        ),
         id="radar_nav"
     )
 
 def market_radar_server(input, output, session, global_interval, global_universe):
-    snapshot_data = reactive.Value(pd.DataFrame())
-    active_axes_meta = reactive.Value({"x_label": "X", "y_label": "Y", "z_label": "None", "z_active": False})
+    from src.cache_store import get_ui_state
+    ui_state = get_ui_state()
+
+    saved_snap = ui_state.load("market_radar_snapshot") or {}
+    saved_snap_rows = saved_snap.get("records", [])
+    saved_snap_meta = saved_snap.get("axes_meta", {"x_label": "X", "y_label": "Y", "z_label": "None", "z_active": False})
+
+    snapshot_data = reactive.Value(pd.DataFrame(saved_snap_rows) if saved_snap_rows else pd.DataFrame())
+    active_axes_meta = reactive.Value(saved_snap_meta)
     rpg_data = reactive.Value(pd.DataFrame())
     selected_symbol_data = reactive.Value(None)
     
-    # Track selected symbols for snapshot and RPG
-    selected_symbols_radar = reactive.Value(set())
-    selected_symbols_rpg = reactive.Value(set())
+    # Track selected symbols for snapshot and RPG (synchronously seeded from global_universe)
+    with reactive.isolate():
+        _seed_syms = set(s for s in (global_universe.get() or []) if s not in IGNORED_CRYPTO)
+    selected_symbols_radar = reactive.Value(set(_seed_syms))
+    selected_symbols_rpg = reactive.Value(set(_seed_syms))
     
     # Track focus symbol for RPG specifically
     selected_rpg_focus_data = reactive.Value(None)
@@ -279,7 +366,7 @@ def market_radar_server(input, output, session, global_interval, global_universe
         if symbol:
             sym_upper = symbol.upper()
             selected_symbol_data.set(sym_upper)
-            if input.btn_calc_snapshot() > 0:
+            if not snapshot_data.get().empty:
                 ui.update_selectize("quick_symbol", selected=[sym_upper])
 
     @reactive.effect
@@ -428,13 +515,18 @@ def market_radar_server(input, output, session, global_interval, global_universe
                     ui.notification_show("Failed to compute metrics for any symbols.", type="error")
                     return
                 res_df = pd.DataFrame(results)
-                active_axes_meta.set({
+                axes_meta = {
                     "x_label": _axis_label(x_cfg["source"], x_cfg["metric"], x_cfg["interval"]),
                     "y_label": _axis_label(y_cfg["source"], y_cfg["metric"], y_cfg["interval"]),
                     "z_label": _axis_label(z_cfg["source"], z_cfg["metric"], z_cfg["interval"]) if z_cfg else "None",
                     "z_active": z_cfg is not None,
-                })
+                }
+                active_axes_meta.set(axes_meta)
                 snapshot_data.set(res_df)
+                ui_state.save("market_radar_snapshot", {
+                    "records": results,
+                    "axes_meta": axes_meta,
+                })
                 if resp_json.get("rate_limited"):
                     cd = resp_json.get("cooldown_sec", 0)
                     ui.notification_show(f"Binance API rate-limited (cooldown {cd}s). Orderbook/API metrics may show 0 until cooldown ends.", type="warning")
@@ -449,8 +541,10 @@ def market_radar_server(input, output, session, global_interval, global_universe
             ui.notification_show(f"Calculation error: {str(e)}", type="error")
 
     @reactive.effect
-    @reactive.event(input.btn_calc_snapshot)
+    @reactive.event(input.btn_calc_snapshot, ignore_init=True)
     async def _():
+        if not input.btn_calc_snapshot() or input.btn_calc_snapshot() <= 0:
+            return
         await _run_snapshot_fetch(show_progress=True)
 
     @render.ui
@@ -490,7 +584,7 @@ def market_radar_server(input, output, session, global_interval, global_universe
         return "true" if not rpg_data.get().empty else "false"
     
     @reactive.calc
-    def filtered_snapshot_df():
+    def normalized_snapshot_df():
         df = snapshot_data.get().copy()
         if df.empty:
             return df
@@ -523,6 +617,70 @@ def market_radar_server(input, output, session, global_interval, global_universe
                 std_y = series.std()
                 df['y_val'] = ((series - series.mean()) / std_y) if (std_y and std_y > 1e-9) else 0.0
             
+        return df
+
+    @render.ui
+    def range_sliders_ui():
+        df = normalized_snapshot_df()
+        if df.empty:
+            return ui.div()
+        meta = active_axes_meta.get()
+
+        def make_slider(inp_id, label, col):
+            s = pd.to_numeric(df[col], errors='coerce').dropna()
+            if s.empty:
+                return ui.div()
+            mn, mx = float(s.min()), float(s.max())
+            span = mx - mn
+            if span <= 1e-9:
+                lo, hi, step = round(mn - 1.0, 2), round(mx + 1.0, 2), 0.1
+            else:
+                import math
+                dec = 0 if span >= 100 else (1 if span >= 10 else (2 if span >= 1 else (3 if span >= 0.1 else 4)))
+                pad = 10 ** (-dec)
+                lo = round(math.floor(mn / pad) * pad, dec + 1)
+                hi = round(math.ceil(mx / pad) * pad, dec + 1)
+                step = round(max(span / 100.0, 10 ** (-(dec + 1))), dec + 1)
+            return ui.input_slider(inp_id, label, min=lo, max=hi, value=(lo, hi), step=step, width="100%")
+
+        sliders = [
+            make_slider("x_range_slider", f"X: {meta.get('x_label', 'X')}", "x_val"),
+            make_slider("y_range_slider", f"Y: {meta.get('y_label', 'Y')}", "y_val"),
+        ]
+        if meta.get("z_active") and "z_val" in df.columns:
+            sliders.append(make_slider("z_range_slider", f"Z: {meta.get('z_label', 'Z')}", "z_val"))
+
+        col_w = [12 // len(sliders)] * len(sliders)
+        return ui.div(
+            ui.layout_columns(*sliders, col_widths=col_w),
+            class_="px-3 pt-2 pb-1 border-bottom border-secondary bg-dark bg-opacity-25"
+        )
+
+    @reactive.calc
+    def filtered_snapshot_df():
+        df = normalized_snapshot_df()
+        if df.empty:
+            return df
+
+        meta = active_axes_meta.get()
+        for inp_id, col in [("x_range_slider", "x_val"), ("y_range_slider", "y_val")]:
+            try:
+                rng = getattr(input, inp_id)()
+                if rng is not None and len(rng) == 2 and col in df.columns:
+                    vals = pd.to_numeric(df[col], errors='coerce')
+                    df = df[(vals >= rng[0]) & (vals <= rng[1])]
+            except Exception:
+                pass
+
+        if meta.get("z_active") and "z_val" in df.columns:
+            try:
+                z_rng = input.z_range_slider()
+                if z_rng is not None and len(z_rng) == 2:
+                    z_vals = pd.to_numeric(df["z_val"], errors='coerce')
+                    df = df[(z_vals >= z_rng[0]) & (z_vals <= z_rng[1])]
+            except Exception:
+                pass
+
         return df
 
     @reactive.calc
@@ -997,6 +1155,198 @@ def market_radar_server(input, output, session, global_interval, global_universe
                 ))
         
         return fig
+
+    # =========================================================================
+    # OVERVALUED SHORT SCANNER
+    # =========================================================================
+    saved_scan = ui_state.load("market_radar_scanner") or {}
+    saved_scan_rows = saved_scan.get("records", [])
+    scan_data = reactive.Value(pd.DataFrame(saved_scan_rows) if saved_scan_rows else pd.DataFrame())
+
+    @render.text
+    def scanner_ready():
+        return "true" if not scan_data.get().empty else "false"
+
+    @render.ui
+    def scan_universe_badge():
+        syms = selected_symbols_radar.get() or set(global_universe.get() or [])
+        count = len(syms) if syms else 0
+        return ui.div(
+            ui.span(
+                fa.icon_svg("globe"),
+                f"Global: {count} assets",
+                class_="badge bg-info text-dark px-3 py-1 d-inline-flex align-items-center justify-content-center gap-1 font-monospace shadow-sm",
+                style="font-size: 0.8rem; letter-spacing: 0.5px;"
+            ),
+            class_="d-flex justify-content-center w-100 my-2 text-center"
+        )
+
+    def _safe_num(inp_name, default):
+        try:
+            v = getattr(input, inp_name)()
+            return default if v is None else v
+        except Exception:
+            return default
+
+    @reactive.effect
+    @reactive.event(input.btn_run_scanner, ignore_init=True)
+    async def _():
+        if not input.btn_run_scanner() or input.btn_run_scanner() <= 0:
+            return
+        try:
+            with reactive.isolate():
+                syms = list(selected_symbols_radar.get() or global_universe.get() or MANDATORY_CRYPTO)
+            symbols = sorted([s for s in syms if s not in IGNORED_CRYPTO])
+            if not symbols:
+                ui.notification_show("Please select symbols in the ASSET FILTER tab first.", type="warning")
+                return
+
+            payload = {
+                "symbols": symbols,
+                "interval": _safe_num("scan_interval", "1h"),
+                "win_price": int(_safe_num("scan_win_price", 24)),
+                "win_oi": int(_safe_num("scan_win_oi", 24)),
+                "win_top_ls": int(_safe_num("scan_win_top", 24)),
+                "win_funding": int(_safe_num("scan_win_funding", 24)),
+                "deviation_pct": float(_safe_num("scan_ob_dev", 2.0)),
+                "w_price": float(_safe_num("scan_w_price", 20)),
+                "w_oi": float(_safe_num("scan_w_oi", 20)),
+                "w_top_ls": float(_safe_num("scan_w_top", 20)),
+                "w_ob": float(_safe_num("scan_w_ob", 20)),
+                "w_funding": float(_safe_num("scan_w_funding", 20)),
+            }
+            with ui.Progress(min=0, max=100) as p:
+                p.set(message=f"Scanning {len(symbols)} selected assets...")
+                res = requests.post(f"{API_BASE_URL}/market-radar/overvalued-scan", json=payload, timeout=120)
+
+            if res.status_code == 200:
+                resp_json = res.json()
+                cands = resp_json.get("candidates", [])
+                scan_data.set(pd.DataFrame(cands))
+                ui_state.save("market_radar_scanner", {"records": cands})
+                if resp_json.get("rate_limited"):
+                    cd = resp_json.get("cooldown_sec", 0)
+                    ui.notification_show(f"Binance rate-limited (cooldown {cd}s). Orderbook scores may be partial.", type="warning")
+                else:
+                    ui.notification_show(f"Short Scanner ranked {len(cands)} perp assets!", type="success")
+            else:
+                ui.notification_show(f"Scanner error: {res.text}", type="error")
+        except Exception as e:
+            logger.log("Market Radar", "ERROR", f"Short scanner error: {e}")
+            ui.notification_show(f"Scanner error: {e}", type="error")
+
+    @reactive.calc
+    def filtered_scan_df():
+        df = scan_data.get().copy()
+        if df.empty:
+            return df
+        flt = input.scan_signal_filter()
+        if flt and flt != "ALL" and "signal" in df.columns:
+            df = df[df["signal"] == flt]
+        return df
+
+    @render.ui
+    def scan_summary_ui():
+        df = scan_data.get()
+        if df.empty:
+            return ui.div()
+        trig_cnt = int((df["signal"] == "TRIGGERED").sum()) if "signal" in df.columns else 0
+        setup_cnt = int((df["signal"] == "SETUP").sum()) if "signal" in df.columns else 0
+        watch_cnt = int((df["signal"] == "WATCH").sum()) if "signal" in df.columns else 0
+        top_sym = df.iloc[0]["symbol"] if len(df) > 0 else "-"
+        top_sc = df.iloc[0]["total_score"] if len(df) > 0 else 0
+        return ui.layout_columns(
+            ui.value_box("Scanned", str(len(df)), theme="primary"),
+            ui.value_box("TRIGGERED (Ask Bias)", str(trig_cnt), theme="danger"),
+            ui.value_box("SETUP (Forming)", str(setup_cnt), theme="warning"),
+            ui.value_box("Top Candidate", f"{top_sym} ({top_sc})", theme="info"),
+            col_widths=[3, 3, 3, 3],
+            class_="mb-3"
+        )
+
+    @render_widget
+    def scan_chart():
+        df = filtered_scan_df()
+        if df.empty:
+            fig = go.Figure()
+            fig.add_annotation(text="No candidates matching filter", showarrow=False, font=dict(size=18))
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#0b3d91", plot_bgcolor="#0b3d91")
+            return fig
+
+        top20 = df.head(20).iloc[::-1]
+        wp = float(_safe_num("scan_w_price", 20))
+        wo = float(_safe_num("scan_w_oi", 20))
+        wt = float(_safe_num("scan_w_top", 20))
+        wob = float(_safe_num("scan_w_ob", 20))
+        wf = float(_safe_num("scan_w_funding", 20))
+        w_sum = max(wp + wo + wt + wob + wf, 1e-6)
+
+        c_price = top20["score_price"] * wp / w_sum
+        c_oi = top20["score_oi"] * wo / w_sum
+        c_top = top20["score_top_short"] * wt / w_sum
+        c_ob = top20["score_ob_ask"] * wob / w_sum
+        c_fund = top20["score_funding"] * wf / w_sum if "score_funding" in top20.columns else 0
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(y=top20["symbol"], x=c_price, name="Price Inflation", orientation="h", marker_color="#FF6B6B"))
+        fig.add_trace(go.Bar(y=top20["symbol"], x=c_oi, name="OI Expansion", orientation="h", marker_color="#FFD166"))
+        fig.add_trace(go.Bar(y=top20["symbol"], x=c_top, name="Top Trader Short", orientation="h", marker_color="#06D6A0"))
+        fig.add_trace(go.Bar(y=top20["symbol"], x=c_ob, name="OB Ask Bias", orientation="h", marker_color="#118AB2"))
+        fig.add_trace(go.Bar(y=top20["symbol"], x=c_fund, name="Funding Short", orientation="h", marker_color="#A78BFA"))
+
+        fig.update_layout(
+            barmode="stack",
+            template="plotly_dark",
+            paper_bgcolor="#0b3d91",
+            plot_bgcolor="#0b3d91",
+            height=520,
+            margin=dict(l=110, r=30, t=40, b=45),
+            xaxis_title="Weighted Short Score (0 - 100)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),
+            font=dict(family="Space Mono", color="white")
+        )
+        return fig
+
+    @render.data_frame
+    def scan_table():
+        df = filtered_scan_df()
+        if df.empty:
+            return df
+        cols = [
+            "symbol", "signal", "total_score",
+            "score_price", "score_oi", "score_top_short", "score_ob_ask", "score_funding",
+            "chg_24h", "price_z", "oi_z", "top_ls_z", "ob_imbalance", "funding_pct", "funding_z", "vol_24h_m"
+        ]
+        rename_map = {
+            "symbol": "Symbol",
+            "signal": "Signal",
+            "total_score": "Total Score",
+            "score_price": "Price Score",
+            "score_oi": "OI Score",
+            "score_top_short": "Top Short Score",
+            "score_ob_ask": "OB Ask Score",
+            "score_funding": "Funding Score",
+            "chg_24h": "24h Chg %",
+            "price_z": "Price Z",
+            "oi_z": "OI Z",
+            "top_ls_z": "Top L/S Z",
+            "ob_imbalance": "OB Imbalance",
+            "funding_pct": "Funding %",
+            "funding_z": "Funding Z",
+            "vol_24h_m": "Vol 24h ($M)"
+        }
+        out = df[[c for c in cols if c in df.columns]].copy()
+        return render.DataGrid(out.rename(columns=rename_map), selection_mode="row")
+
+    @reactive.effect
+    def _on_scan_row_select():
+        sel = scan_table.cell_selection()
+        if sel and "rows" in sel and sel["rows"]:
+            df = filtered_scan_df()
+            idx = sel["rows"][0]
+            if 0 <= idx < len(df):
+                sym = str(df.iloc[idx]["symbol"]).strip().upper()
+                ui.update_selectize("quick_symbol", selected=[sym])
 
 def get_metric_key(m):
     return 'return' if m == 'metric_return' else m
